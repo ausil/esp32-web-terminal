@@ -6,11 +6,16 @@ A web-based serial terminal for single-board computers (Raspberry Pi, BeagleBone
 
 - **Browser-based terminal** — full terminal emulator using [xterm.js](https://xtermjs.org/), accessible from any device with a browser
 - **WiFi connectivity** — connect via your existing WiFi network (STA mode) or the ESP32's own access point (AP mode)
+- **Smart WiFi management** — AP disabled when STA is connected; auto-fallback to AP if STA drops; reconnect watchdog retries every 30s
 - **HTTPS + WebSocket** — all traffic encrypted with TLS using a self-signed ECC P-256 certificate
 - **Authentication** — session-based login with salted SHA-256 password hashing, rate limiting, and automatic lockout
 - **Remote power control** — reset or power-cycle your SBC via GPIO-driven relay/MOSFET
 - **Configurable baud rate** — change serial speed on the fly from the toolbar (9600–1,500,000)
-- **Persistent configuration** — WiFi credentials, baud rate, and auth settings stored in NVS flash
+- **OTA firmware update** — upload new firmware from the browser with automatic rollback if the new firmware fails to boot
+- **Device identification** — configurable device name shown in UI, browser tab, DHCP hostname, and mDNS
+- **mDNS** — access your device at `<device-name>.local` (e.g., `Pi-Rack-1.local`)
+- **NTP time sync** — automatic time from DHCP-provided NTP server, manual server override available
+- **Persistent configuration** — all settings stored in NVS flash
 - **No external dependencies** — vanilla JS frontend embedded in firmware, no build tools or SPIFFS needed
 
 ## Hardware
@@ -62,7 +67,7 @@ A web-based serial terminal for single-board computers (Raspberry Pi, BeagleBone
 ### First-Time Setup
 
 1. Connect to the ESP32's WiFi access point:
-   - **SSID:** `ESP-Terminal`
+   - **SSID:** `ESP-Terminal-XXXX` (last 4 hex digits of MAC)
    - **Password:** `esp32term`
 
 2. Open `https://192.168.4.1` in your browser (accept the self-signed certificate warning).
@@ -73,7 +78,12 @@ A web-based serial terminal for single-board computers (Raspberry Pi, BeagleBone
 
 4. You'll be prompted to change the default password on first login.
 
-5. Optionally, configure your home WiFi credentials via the config API so the ESP32 joins your network (STA mode). The AP remains available as a fallback.
+5. Open **Settings** to configure:
+   - **Device name** — identifies this unit (shown in UI, DHCP, mDNS)
+   - **WiFi** — enter your network SSID/password to join your LAN
+   - **NTP server** — leave empty for DHCP auto-discovery, or set a specific server
+
+Once WiFi is configured, the AP is disabled and the device is accessible at `https://<device-name>.local` or its DHCP-assigned IP.
 
 ## Usage
 
@@ -83,18 +93,33 @@ Once logged in, you'll see a full terminal connected to your SBC's serial port. 
 
 ### Toolbar
 
+- **Device name** — shown at the left of the toolbar
 - **Baud rate** — select from the dropdown to change serial speed (takes effect immediately)
 - **Reset SBC** — sends a reset pulse via GPIO22
 - **Power** — toggles SBC power via GPIO23
+- **Settings** — device name, WiFi, NTP, password, power-on default, OTA firmware update
 - **Logout** — ends your session
 
 ### WiFi Modes
 
-| Mode   | When                                       | Access URL              |
-|--------|--------------------------------------------|------------------------|
-| AP     | No STA credentials configured (default)    | `https://192.168.4.1`  |
-| AP+STA | STA credentials configured, connected      | `https://<STA IP>` or `https://192.168.4.1` |
-| AP     | STA credentials configured, connection failed | `https://192.168.4.1` (auto-fallback) |
+| Mode   | When                                  | Access URL                |
+|--------|---------------------------------------|--------------------------|
+| AP     | No STA credentials configured         | `https://192.168.4.1`    |
+| AP+STA | Connecting to STA or STA failed       | Both AP and STA IPs      |
+| STA    | Successfully connected to WiFi        | `https://<IP>` or `https://<name>.local` |
+
+When STA is connected, the AP is disabled to avoid broadcasting. If STA drops, the AP re-enables automatically and a watchdog retries STA every 30 seconds.
+
+### Multiple Devices
+
+Each ESP32 Web Terminal can be given a unique device name in Settings. The name is used for:
+- Browser tab title and toolbar header
+- DHCP client hostname (visible on your router)
+- mDNS hostname (`<name>.local`)
+
+### OTA Updates
+
+Upload new firmware via **Settings > Firmware Update**. The device reboots after upload. If the new firmware fails to start (crash, hang), the bootloader automatically rolls back to the previous working version.
 
 ## REST API
 
@@ -105,10 +130,29 @@ All API endpoints require authentication via session cookie (obtained from `/api
 | POST   | `/api/login`   | Authenticate, returns session token  | `{"username": "...", "password": "..."}`         |
 | POST   | `/api/logout`  | Invalidate session                   | —                                                |
 | GET    | `/api/config`  | Get current configuration            | —                                                |
-| POST   | `/api/config`  | Update configuration                 | `{"baud_rate": 115200}`, `{"sta_ssid": "...", "sta_pass": "..."}`, or `{"new_password": "..."}` |
+| POST   | `/api/config`  | Update configuration                 | See below                                        |
 | POST   | `/api/reset`   | Trigger SBC reset via GPIO           | —                                                |
-| POST   | `/api/power`   | Toggle SBC power via GPIO            | —                                                |
+| POST   | `/api/power`   | Toggle or set SBC power              | `{"power": true}` or empty for toggle            |
+| POST   | `/api/ota`     | Upload firmware binary               | Raw binary body                                  |
 | GET    | `/ws`          | WebSocket for terminal data          | Binary frames (serial data)                      |
+
+### Config POST fields
+
+All fields are optional; include only what you want to change:
+
+| Field             | Type    | Description                    |
+|-------------------|---------|--------------------------------|
+| `baud_rate`       | number  | Serial baud rate               |
+| `sta_ssid`        | string  | WiFi network SSID              |
+| `sta_pass`        | string  | WiFi network password          |
+| `new_password`    | string  | New login password             |
+| `device_name`     | string  | Device identifier              |
+| `ntp_server`      | string  | NTP server (empty = use DHCP)  |
+| `power_on_default`| boolean | Power on SBC at boot           |
+
+### Config GET response
+
+Returns current state including: `baud_rate`, `power_on`, `power_on_default`, `sta_ssid`, `sta_connected`, `sta_ip`, `ap_ip`, `wifi_mode`, `auth_initialized`, `device_name`, `ntp_server`, `ntp_active_server`, `ntp_synced`.
 
 ## Security
 
@@ -117,34 +161,37 @@ All API endpoints require authentication via session cookie (obtained from `/api
 - **Session management** — up to 4 concurrent sessions, each with a 1-hour timeout. Sessions use 32-byte random tokens.
 - **Rate limiting** — after 5 failed login attempts, login is locked out for 5 minutes.
 - **Default credentials** — `admin`/`admin` with forced password change on first login.
+- **Watchdog** — task watchdog (10s timeout) reboots the device if the system hangs.
+- **OTA rollback** — bad firmware is automatically reverted by the bootloader.
 
 ## Project Structure
 
 ```
 main/
-  main.c            Entry point, initializes all subsystems
+  main.c            Entry point, NTP init, OTA verification
   config.c/h        NVS persistent configuration
-  wifi_manager.c/h  AP + STA WiFi with auto-fallback
+  wifi_manager.c/h  AP + STA WiFi, mDNS, reconnect watchdog
   auth.c/h          Session auth, salted SHA-256, rate limiting
   uart_bridge.c/h   UART ↔ WebSocket bridge
-  web_server.c/h    HTTPS server, REST API, WebSocket
+  web_server.c/h    HTTPS server, REST API, WebSocket, OTA
   gpio_control.c/h  SBC reset and power control
 frontend/
-  index.html        Single-page terminal UI
-  terminal.js       WebSocket client, login flow, toolbar
-  style.css         Dark theme styling
+  index.html        Single-page terminal UI (all CSS/JS inlined)
+  terminal.js       WebSocket client, login flow, toolbar (reference)
+  style.css         Dark theme styling (reference)
 certs/
   generate_cert.sh  Generates self-signed ECC P-256 cert
 ```
 
 ## Partition Table
 
-| Partition | Type | Size    |
-|-----------|------|---------|
-| nvs       | data | 24 KB   |
-| phy_init  | data | 4 KB    |
-| factory   | app  | 1920 KB |
-| storage   | data | 64 KB   |
+| Partition | Type | Size    | Purpose          |
+|-----------|------|---------|------------------|
+| nvs       | data | 24 KB   | Configuration    |
+| otadata   | data | 8 KB    | OTA boot state   |
+| ota_0     | app  | 1920 KB | Firmware slot A  |
+| ota_1     | app  | 1920 KB | Firmware slot B  |
+| storage   | data | 128 KB  | Reserved         |
 
 ## License
 
