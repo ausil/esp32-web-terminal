@@ -6,7 +6,10 @@
 #include "wifi_manager.h"
 #include "esp_https_server.h"
 #include "esp_ota_ops.h"
+#include "esp_chip_info.h"
+#include "esp_app_desc.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "cJSON.h"
 #include <string.h>
 #include <stdlib.h>
@@ -202,6 +205,62 @@ static esp_err_t handle_logout(httpd_req_t *req)
     httpd_resp_set_hdr(req, "Set-Cookie", "session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict");
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, "{\"ok\":true}", 11);
+}
+
+static esp_err_t handle_sysinfo(httpd_req_t *req)
+{
+    if (!require_auth(req)) return ESP_OK;
+
+    cJSON *root = cJSON_CreateObject();
+
+    // Chip info
+    esp_chip_info_t chip;
+    esp_chip_info(&chip);
+    cJSON_AddStringToObject(root, "chip", CONFIG_IDF_TARGET);
+    cJSON_AddNumberToObject(root, "cores", chip.cores);
+    cJSON_AddNumberToObject(root, "revision", chip.revision);
+
+    // Firmware
+    const esp_app_desc_t *app = esp_app_get_description();
+    cJSON_AddStringToObject(root, "firmware_version", app->version);
+    cJSON_AddStringToObject(root, "idf_version", app->idf_ver);
+    cJSON_AddStringToObject(root, "build_date", app->date);
+    cJSON_AddStringToObject(root, "build_time", app->time);
+
+    // OTA partition
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    if (running) {
+        cJSON_AddStringToObject(root, "ota_partition", running->label);
+    }
+
+    // Memory
+    cJSON_AddNumberToObject(root, "free_heap", (double)esp_get_free_heap_size());
+    cJSON_AddNumberToObject(root, "min_free_heap", (double)esp_get_minimum_free_heap_size());
+
+    // Uptime
+    int64_t uptime_us = esp_timer_get_time();
+    int uptime_s = (int)(uptime_us / 1000000);
+    int days = uptime_s / 86400;
+    int hours = (uptime_s % 86400) / 3600;
+    int mins = (uptime_s % 3600) / 60;
+    int secs = uptime_s % 60;
+    char uptime_str[64];
+    if (days > 0) {
+        snprintf(uptime_str, sizeof(uptime_str), "%dd %dh %dm %ds", days, hours, mins, secs);
+    } else if (hours > 0) {
+        snprintf(uptime_str, sizeof(uptime_str), "%dh %dm %ds", hours, mins, secs);
+    } else {
+        snprintf(uptime_str, sizeof(uptime_str), "%dm %ds", mins, secs);
+    }
+    cJSON_AddStringToObject(root, "uptime", uptime_str);
+    cJSON_AddNumberToObject(root, "uptime_seconds", uptime_s);
+
+    char *json_str = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t ret = httpd_resp_send(req, json_str, strlen(json_str));
+    free(json_str);
+    return ret;
 }
 
 static esp_err_t handle_config_get(httpd_req_t *req)
@@ -492,7 +551,7 @@ esp_err_t web_server_start(void)
 {
     httpd_ssl_config_t config = HTTPD_SSL_CONFIG_DEFAULT();
     config.httpd.max_open_sockets = 4;
-    config.httpd.max_uri_handlers = 12;
+    config.httpd.max_uri_handlers = 14;
     config.httpd.stack_size = 10240;
     config.httpd.lru_purge_enable = true;
     config.httpd.close_fn = on_close;
@@ -521,6 +580,7 @@ esp_err_t web_server_start(void)
     const httpd_uri_t route_reset = { .uri = "/api/reset", .method = HTTP_POST, .handler = handle_reset };
     const httpd_uri_t route_power = { .uri = "/api/power", .method = HTTP_POST, .handler = handle_power };
     const httpd_uri_t route_ota = { .uri = "/api/ota", .method = HTTP_POST, .handler = handle_ota };
+    const httpd_uri_t route_sysinfo = { .uri = "/api/sysinfo", .method = HTTP_GET, .handler = handle_sysinfo };
 
     /* WebSocket */
     const httpd_uri_t route_ws = { .uri = "/ws", .method = HTTP_GET, .handler = handle_ws, .is_websocket = true };
@@ -534,6 +594,7 @@ esp_err_t web_server_start(void)
     httpd_register_uri_handler(s_server, &route_reset);
     httpd_register_uri_handler(s_server, &route_power);
     httpd_register_uri_handler(s_server, &route_ota);
+    httpd_register_uri_handler(s_server, &route_sysinfo);
     httpd_register_uri_handler(s_server, &route_ws);
 
     httpd_register_err_handler(s_server, HTTPD_404_NOT_FOUND, handle_404);

@@ -16,6 +16,8 @@ A web-based serial terminal for single-board computers (Raspberry Pi, BeagleBone
 - **mDNS** — access your device at `<device-name>.local` (e.g., `Pi-Rack-1.local`)
 - **NTP time sync** — automatic time from DHCP-provided NTP server, manual server override available
 - **Persistent configuration** — all settings stored in NVS flash
+- **Session log download** — save terminal scrollback to a timestamped `.log` file
+- **System info** — firmware version, chip info, heap usage, uptime visible in Settings
 - **No external dependencies** — vanilla JS frontend embedded in firmware, no build tools or SPIFFS needed
 
 ## Hardware
@@ -97,7 +99,8 @@ Once logged in, you'll see a full terminal connected to your SBC's serial port. 
 - **Baud rate** — select from the dropdown to change serial speed (takes effect immediately)
 - **Reset SBC** — sends a reset pulse via GPIO22
 - **Power** — toggles SBC power via GPIO23
-- **Settings** — device name, WiFi, NTP, password, power-on default, OTA firmware update
+- **Save Log** — download terminal scrollback as a `.log` file
+- **Settings** — device name, WiFi, NTP, password, power-on default, system info, OTA firmware update
 - **Logout** — ends your session
 
 ### WiFi Modes
@@ -134,6 +137,7 @@ All API endpoints require authentication via session cookie (obtained from `/api
 | POST   | `/api/reset`   | Trigger SBC reset via GPIO           | —                                                |
 | POST   | `/api/power`   | Toggle or set SBC power              | `{"power": true}` or empty for toggle            |
 | POST   | `/api/ota`     | Upload firmware binary               | Raw binary body                                  |
+| GET    | `/api/sysinfo` | System info (chip, heap, uptime)     | —                                                |
 | GET    | `/ws`          | WebSocket for terminal data          | Binary frames (serial data)                      |
 
 ### Config POST fields
@@ -153,6 +157,10 @@ All fields are optional; include only what you want to change:
 ### Config GET response
 
 Returns current state including: `baud_rate`, `power_on`, `power_on_default`, `sta_ssid`, `sta_connected`, `sta_ip`, `ap_ip`, `wifi_mode`, `auth_initialized`, `device_name`, `ntp_server`, `ntp_active_server`, `ntp_synced`.
+
+### Sysinfo GET response
+
+Returns: `chip`, `cores`, `revision`, `firmware_version`, `idf_version`, `build_date`, `build_time`, `ota_partition`, `free_heap`, `min_free_heap`, `uptime`, `uptime_seconds`.
 
 ## Security
 

@@ -135,6 +135,7 @@ body {
         </select>
         <button id="btn-reset" class="danger">Reset SBC</button>
         <button id="btn-power" class="power-on">Power: ON</button>
+        <button id="btn-save-log">Save Log</button>
         <button id="btn-settings">Settings</button>
         <button id="btn-logout">Logout</button>
     </div>
@@ -171,6 +172,10 @@ body {
             <fieldset>
                 <legend>Power</legend>
                 <label><input type="checkbox" id="power-default"> Power on SBC at boot</label>
+            </fieldset>
+            <fieldset>
+                <legend>System Info</legend>
+                <div id="sysinfo" style="font-size:13px;line-height:1.6"></div>
             </fieldset>
             <fieldset>
                 <legend>Firmware Update</legend>
@@ -376,11 +381,54 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
         });
     });
 
+    // --- Save Log ---
+
+    document.getElementById("btn-save-log").addEventListener("click", function() {
+        if (!term) return;
+        var buf = term.buffer.active;
+        var lines = [];
+        for (var i = 0; i < buf.length; i++) {
+            var line = buf.getLine(i);
+            if (line) lines.push(line.translateToString(true));
+        }
+        // Trim trailing empty lines
+        while (lines.length > 0 && lines[lines.length - 1].trim() === "") lines.pop();
+        if (lines.length === 0) return;
+
+        var text = lines.join("\n") + "\n";
+        var now = new Date();
+        var ts = now.getFullYear() +
+            ("0" + (now.getMonth() + 1)).slice(-2) +
+            ("0" + now.getDate()).slice(-2) + "-" +
+            ("0" + now.getHours()).slice(-2) +
+            ("0" + now.getMinutes()).slice(-2) +
+            ("0" + now.getSeconds()).slice(-2);
+        var name = (document.getElementById("device-title").textContent || "terminal").replace(/[^a-zA-Z0-9_-]/g, "_");
+        var blob = new Blob([text], {type: "text/plain"});
+        var a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = name + "_" + ts + ".log";
+        a.click();
+        URL.revokeObjectURL(a.href);
+    });
+
     // --- Settings ---
 
     document.getElementById("btn-settings").addEventListener("click", function() {
         settingsOverlay.classList.remove("hidden");
         settingsStatus.textContent = "";
+        // Load system info
+        api("GET", "/api/sysinfo", null, function(err, info) {
+            var el = document.getElementById("sysinfo");
+            if (err || !info) { el.textContent = "Failed to load"; return; }
+            el.innerHTML =
+                "<b>Firmware:</b> " + info.firmware_version + " (built " + info.build_date + " " + info.build_time + ")<br>" +
+                "<b>ESP-IDF:</b> " + info.idf_version + "<br>" +
+                "<b>Chip:</b> " + info.chip + " rev " + info.revision + " (" + info.cores + " core" + (info.cores > 1 ? "s" : "") + ")<br>" +
+                "<b>Partition:</b> " + info.ota_partition + "<br>" +
+                "<b>Free heap:</b> " + (info.free_heap / 1024).toFixed(0) + " KB (min: " + (info.min_free_heap / 1024).toFixed(0) + " KB)<br>" +
+                "<b>Uptime:</b> " + info.uptime;
+        });
         api("GET", "/api/config", null, function(err, conf) {
             if (err || !conf) return;
             document.getElementById("sta-ssid").value = conf.sta_ssid || "";

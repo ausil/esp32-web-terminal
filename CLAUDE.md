@@ -37,7 +37,7 @@ main/
   wifi_manager.c/h  - AP+STA WiFi with auto-fallback, mDNS, DHCP hostname, reconnect watchdog
   auth.c/h          - Session-based auth, salted SHA-256, rate limiting
   uart_bridge.c/h   - UART1 (GPIO10/11) ↔ WebSocket bridge, configurable baud
-  web_server.c/h    - HTTPS server, REST API, WebSocket, OTA, embedded static files
+  web_server.c/h    - HTTPS server, REST API, WebSocket, OTA, sysinfo, embedded static files
   gpio_control.c/h  - SBC reset (GPIO22) and power control (GPIO23)
 frontend/
   index.html        - Single-page terminal UI (all CSS, app JS, FitAddon inlined)
@@ -56,6 +56,7 @@ certs/
 - `POST /api/reset` — trigger SBC reset via GPIO
 - `POST /api/power` — toggle SBC power via GPIO
 - `POST /api/ota` — upload firmware binary for OTA update
+- `GET /api/sysinfo` — system info (chip, firmware, heap, uptime)
 - `GET /ws` — WebSocket for terminal data (requires auth cookie or ?token= query param)
 
 ## Pin Assignments
