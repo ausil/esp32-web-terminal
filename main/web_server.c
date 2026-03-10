@@ -1,0 +1,551 @@
+#include "web_server.h"
+#include "auth.h"
+#include "config.h"
+#include "uart_bridge.h"
+#include "gpio_control.h"
+#include "wifi_manager.h"
+#include "esp_https_server.h"
+#include "esp_ota_ops.h"
+#include "esp_log.h"
+#include "cJSON.h"
+#include <string.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+// NTP status from main.c
+extern const char *ntp_get_server(void);
+extern bool ntp_is_synced(void);
+
+static const char *TAG = "web_srv";
+
+static httpd_handle_t s_server = NULL;
+
+/* Embedded files:
+ * - index.html via EMBED_TXTFILES (adds null terminator, use strlen)
+ * - xterm.min.js.gz via EMBED_FILES (raw binary, no null terminator)
+ */
+extern const uint8_t index_html_start[] asm("_binary_index_html_start");
+extern const uint8_t index_html_end[]   asm("_binary_index_html_end");
+extern const uint8_t xterm_gz_start[]   asm("_binary_xterm_min_js_gz_start");
+extern const uint8_t xterm_gz_end[]     asm("_binary_xterm_min_js_gz_end");
+extern const uint8_t server_crt_start[] asm("_binary_server_crt_start");
+extern const uint8_t server_crt_end[]   asm("_binary_server_crt_end");
+extern const uint8_t server_key_start[] asm("_binary_server_key_start");
+extern const uint8_t server_key_end[]   asm("_binary_server_key_end");
+
+// --- WebSocket client tracking ---
+#define MAX_WS_CLIENTS 4
+
+typedef struct {
+    int fd;
+    bool active;
+} ws_client_t;
+
+static ws_client_t s_ws_clients[MAX_WS_CLIENTS];
+
+static void ws_add_client(int fd)
+{
+    for (int i = 0; i < MAX_WS_CLIENTS; i++) {
+        if (!s_ws_clients[i].active) {
+            s_ws_clients[i].fd = fd;
+            s_ws_clients[i].active = true;
+            ESP_LOGI(TAG, "WS client added: fd=%d slot=%d", fd, i);
+            return;
+        }
+    }
+    ESP_LOGW(TAG, "WS client slots full, rejecting fd=%d", fd);
+}
+
+static void ws_remove_client(int fd)
+{
+    for (int i = 0; i < MAX_WS_CLIENTS; i++) {
+        if (s_ws_clients[i].active && s_ws_clients[i].fd == fd) {
+            s_ws_clients[i].active = false;
+            return;
+        }
+    }
+}
+
+void web_server_ws_broadcast(const uint8_t *data, size_t len)
+{
+    if (!s_server) return;
+
+    httpd_ws_frame_t ws_pkt = {
+        .type = HTTPD_WS_TYPE_BINARY,
+        .payload = (uint8_t *)data,
+        .len = len,
+    };
+
+    for (int i = 0; i < MAX_WS_CLIENTS; i++) {
+        if (s_ws_clients[i].active) {
+            esp_err_t err = httpd_ws_send_frame_async(s_server, s_ws_clients[i].fd, &ws_pkt);
+            if (err != ESP_OK) {
+                s_ws_clients[i].active = false;
+            }
+        }
+    }
+}
+
+// --- Helpers ---
+
+static esp_err_t send_json_error(httpd_req_t *req, int status, const char *message)
+{
+    httpd_resp_set_status(req, status == 401 ? "401 Unauthorized" :
+                                status == 429 ? "429 Too Many Requests" :
+                                "400 Bad Request");
+    httpd_resp_set_type(req, "application/json");
+    char buf[128];
+    snprintf(buf, sizeof(buf), "{\"error\":\"%s\"}", message);
+    return httpd_resp_send(req, buf, strlen(buf));
+}
+
+static bool require_auth(httpd_req_t *req)
+{
+    if (!auth_check_request(req)) {
+        send_json_error(req, 401, "Authentication required");
+        return false;
+    }
+    return true;
+}
+
+// --- Static file handlers ---
+
+static esp_err_t handle_root(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/html");
+    /* EMBED_TXTFILES adds null terminator; use strlen to get actual content length */
+    return httpd_resp_send(req, (const char *)index_html_start, strlen((const char *)index_html_start));
+}
+
+static esp_err_t handle_xterm_js(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "application/javascript");
+    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    httpd_resp_set_hdr(req, "Cache-Control", "public, max-age=86400");
+
+    /* Send in 4KB chunks to avoid overwhelming the single-threaded server */
+    const size_t total = xterm_gz_end - xterm_gz_start;
+    const size_t chunk_size = 4096;
+    size_t sent = 0;
+
+    while (sent < total) {
+        size_t to_send = total - sent;
+        if (to_send > chunk_size) to_send = chunk_size;
+        esp_err_t err = httpd_resp_send_chunk(req, (const char *)xterm_gz_start + sent, to_send);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "xterm chunk send failed at %d/%d", (int)sent, (int)total);
+            httpd_resp_send_chunk(req, NULL, 0);
+            return err;
+        }
+        sent += to_send;
+    }
+    /* End chunked response */
+    return httpd_resp_send_chunk(req, NULL, 0);
+}
+
+// --- Captive portal 404 ---
+
+static esp_err_t handle_404(httpd_req_t *req, httpd_err_code_t err)
+{
+    httpd_resp_set_status(req, "302 Found");
+    httpd_resp_set_hdr(req, "Location", "https://192.168.4.1/");
+    return httpd_resp_send(req, NULL, 0);
+}
+
+// --- API handlers ---
+
+static esp_err_t handle_login(httpd_req_t *req)
+{
+    if (auth_is_locked_out()) {
+        return send_json_error(req, 429, "Too many failed attempts. Try again later.");
+    }
+
+    char buf[256];
+    int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (len <= 0) return send_json_error(req, 400, "Empty request body");
+    buf[len] = '\0';
+
+    cJSON *json = cJSON_Parse(buf);
+    if (!json) return send_json_error(req, 400, "Invalid JSON");
+
+    const cJSON *username = cJSON_GetObjectItem(json, "username");
+    const cJSON *password = cJSON_GetObjectItem(json, "password");
+
+    if (!cJSON_IsString(username) || !cJSON_IsString(password)) {
+        cJSON_Delete(json);
+        return send_json_error(req, 400, "Missing username or password");
+    }
+
+    char *token = auth_login(username->valuestring, password->valuestring);
+    cJSON_Delete(json);
+
+    if (!token) return send_json_error(req, 401, "Invalid credentials");
+
+    char cookie[128];
+    snprintf(cookie, sizeof(cookie), "session=%s; Path=/; HttpOnly; Secure; SameSite=Strict", token);
+    httpd_resp_set_hdr(req, "Set-Cookie", cookie);
+    httpd_resp_set_type(req, "application/json");
+
+    app_config_t *conf = config_get();
+    char resp[256];
+    snprintf(resp, sizeof(resp),
+             "{\"token\":\"%s\",\"must_change_password\":%s}",
+             token, conf->auth_initialized ? "false" : "true");
+    free(token);
+    return httpd_resp_send(req, resp, strlen(resp));
+}
+
+static esp_err_t handle_logout(httpd_req_t *req)
+{
+    char *token = auth_get_token_from_request(req);
+    if (token) { auth_logout(token); free(token); }
+    httpd_resp_set_hdr(req, "Set-Cookie", "session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, "{\"ok\":true}", 11);
+}
+
+static esp_err_t handle_config_get(httpd_req_t *req)
+{
+    if (!require_auth(req)) return ESP_OK;
+
+    app_config_t *conf = config_get();
+    wifi_manager_status_t wifi = wifi_manager_get_status();
+    gpio_status_t gpio = gpio_get_status();
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "baud_rate", conf->baud_rate);
+    cJSON_AddBoolToObject(root, "power_on", gpio.power_on);
+    cJSON_AddBoolToObject(root, "power_on_default", conf->power_on_default);
+    cJSON_AddStringToObject(root, "sta_ssid", conf->sta_ssid);
+    cJSON_AddBoolToObject(root, "sta_connected", wifi.sta_connected);
+    cJSON_AddStringToObject(root, "sta_ip", wifi.sta_ip);
+    cJSON_AddStringToObject(root, "ap_ip", wifi.ap_ip);
+    cJSON_AddStringToObject(root, "wifi_mode",
+                            wifi.mode == WIFI_MGR_MODE_AP ? "ap" :
+                            wifi.mode == WIFI_MGR_MODE_STA ? "sta" : "ap+sta");
+    cJSON_AddBoolToObject(root, "auth_initialized", conf->auth_initialized);
+    cJSON_AddStringToObject(root, "device_name", conf->device_name);
+    cJSON_AddStringToObject(root, "ntp_server", conf->ntp_server);
+    cJSON_AddStringToObject(root, "ntp_active_server", ntp_get_server());
+    cJSON_AddBoolToObject(root, "ntp_synced", ntp_is_synced());
+
+    char *json_str = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t ret = httpd_resp_send(req, json_str, strlen(json_str));
+    free(json_str);
+    return ret;
+}
+
+static esp_err_t handle_config_post(httpd_req_t *req)
+{
+    if (!require_auth(req)) return ESP_OK;
+
+    char buf[512];
+    int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (len <= 0) return send_json_error(req, 400, "Empty request body");
+    buf[len] = '\0';
+
+    cJSON *json = cJSON_Parse(buf);
+    if (!json) return send_json_error(req, 400, "Invalid JSON");
+
+    const cJSON *baud = cJSON_GetObjectItem(json, "baud_rate");
+    if (cJSON_IsNumber(baud)) {
+        uint32_t new_baud = (uint32_t)baud->valuedouble;
+        config_set_baud_rate(new_baud);
+        uart_bridge_set_baud_rate(new_baud);
+    }
+
+    const cJSON *ssid = cJSON_GetObjectItem(json, "sta_ssid");
+    const cJSON *pass = cJSON_GetObjectItem(json, "sta_pass");
+    if (cJSON_IsString(ssid) && cJSON_IsString(pass)) {
+        wifi_manager_connect_sta(ssid->valuestring, pass->valuestring);
+    }
+
+    const cJSON *power_default = cJSON_GetObjectItem(json, "power_on_default");
+    if (cJSON_IsBool(power_default)) {
+        config_set_power_on_default(cJSON_IsTrue(power_default));
+    }
+
+    const cJSON *dev_name = cJSON_GetObjectItem(json, "device_name");
+    if (cJSON_IsString(dev_name) && strlen(dev_name->valuestring) > 0) {
+        config_set_device_name(dev_name->valuestring);
+        wifi_manager_update_hostname(dev_name->valuestring);
+    }
+
+    const cJSON *ntp = cJSON_GetObjectItem(json, "ntp_server");
+    if (ntp && cJSON_IsString(ntp)) {
+        config_set_ntp_server(ntp->valuestring);
+    }
+
+    const cJSON *new_pass = cJSON_GetObjectItem(json, "new_password");
+    if (cJSON_IsString(new_pass)) {
+        const char *user = config_get()->auth_user;
+        const cJSON *new_user = cJSON_GetObjectItem(json, "username");
+        if (cJSON_IsString(new_user)) user = new_user->valuestring;
+        config_set_auth(user, new_pass->valuestring);
+    }
+
+    cJSON_Delete(json);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, "{\"ok\":true}", 11);
+}
+
+static esp_err_t handle_reset(httpd_req_t *req)
+{
+    if (!require_auth(req)) return ESP_OK;
+    esp_err_t err = gpio_sbc_reset();
+    httpd_resp_set_type(req, "application/json");
+    return err == ESP_OK ? httpd_resp_send(req, "{\"ok\":true}", 11)
+                         : send_json_error(req, 400, "Reset failed");
+}
+
+static esp_err_t handle_power(httpd_req_t *req)
+{
+    if (!require_auth(req)) return ESP_OK;
+
+    char buf[128];
+    int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    esp_err_t err;
+
+    if (len > 0) {
+        buf[len] = '\0';
+        cJSON *json = cJSON_Parse(buf);
+        if (json) {
+            const cJSON *state = cJSON_GetObjectItem(json, "power");
+            if (cJSON_IsBool(state)) {
+                err = cJSON_IsTrue(state) ? gpio_sbc_power_on() : gpio_sbc_power_off();
+                cJSON_Delete(json);
+                goto respond;
+            }
+            cJSON_Delete(json);
+        }
+    }
+
+    err = gpio_sbc_power_toggle();
+
+respond:
+    httpd_resp_set_type(req, "application/json");
+    if (err == ESP_OK) {
+        gpio_status_t status = gpio_get_status();
+        char resp[64];
+        snprintf(resp, sizeof(resp), "{\"ok\":true,\"power_on\":%s}",
+                 status.power_on ? "true" : "false");
+        return httpd_resp_send(req, resp, strlen(resp));
+    } else if (err == ESP_ERR_INVALID_STATE) {
+        return send_json_error(req, 429, "Power toggle too fast");
+    }
+    return send_json_error(req, 400, "Power control failed");
+}
+
+// --- OTA firmware update handler ---
+
+static esp_err_t handle_ota(httpd_req_t *req)
+{
+    if (!require_auth(req)) return ESP_OK;
+
+    esp_ota_handle_t ota_handle = 0;
+    const esp_partition_t *update_partition = esp_ota_get_next_update_partition(NULL);
+    if (!update_partition) {
+        ESP_LOGE(TAG, "OTA: no update partition found");
+        return send_json_error(req, 400, "No OTA partition available");
+    }
+
+    esp_err_t err = esp_ota_begin(update_partition, OTA_WITH_SEQUENTIAL_WRITES, &ota_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "OTA begin failed: %s", esp_err_to_name(err));
+        return send_json_error(req, 400, "OTA begin failed");
+    }
+
+    ESP_LOGI(TAG, "OTA started, receiving %d bytes to %s", req->content_len, update_partition->label);
+
+    char buf[4096];
+    int total_read = 0;
+    bool failed = false;
+
+    while (total_read < req->content_len) {
+        int read_len = httpd_req_recv(req, buf, sizeof(buf));
+        if (read_len <= 0) {
+            if (read_len == HTTPD_SOCK_ERR_TIMEOUT) continue;
+            ESP_LOGE(TAG, "OTA recv error at %d/%d", total_read, req->content_len);
+            failed = true;
+            break;
+        }
+
+        err = esp_ota_write(ota_handle, buf, read_len);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "OTA write failed: %s", esp_err_to_name(err));
+            failed = true;
+            break;
+        }
+
+        total_read += read_len;
+    }
+
+    if (failed) {
+        esp_ota_abort(ota_handle);
+        return send_json_error(req, 400, "OTA write failed");
+    }
+
+    err = esp_ota_end(ota_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "OTA end failed: %s", esp_err_to_name(err));
+        return send_json_error(req, 400, "OTA validation failed");
+    }
+
+    err = esp_ota_set_boot_partition(update_partition);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "OTA set boot partition failed: %s", esp_err_to_name(err));
+        return send_json_error(req, 400, "Failed to set boot partition");
+    }
+
+    ESP_LOGI(TAG, "OTA complete (%d bytes), rebooting...", total_read);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, "{\"ok\":true,\"message\":\"Update complete, rebooting...\"}", HTTPD_RESP_USE_STRLEN);
+
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_restart();
+
+    return ESP_OK;
+}
+
+// --- WebSocket handler ---
+
+static esp_err_t handle_ws(httpd_req_t *req)
+{
+    if (req->method == HTTP_GET) {
+        /* WebSocket handshake — check auth via cookie, header, or query param */
+        bool authed = auth_check_request(req);
+        if (!authed) {
+            size_t qlen = httpd_req_get_url_query_len(req);
+            if (qlen > 0) {
+                char *query = malloc(qlen + 1);
+                if (query && httpd_req_get_url_query_str(req, query, qlen + 1) == ESP_OK) {
+                    char token[128];
+                    if (httpd_query_key_value(query, "token", token, sizeof(token)) == ESP_OK) {
+                        authed = auth_validate_session(token);
+                    }
+                }
+                free(query);
+            }
+        }
+        if (!authed) {
+            httpd_resp_set_status(req, "401 Unauthorized");
+            return httpd_resp_send(req, NULL, 0);
+        }
+        int fd = httpd_req_to_sockfd(req);
+        ws_add_client(fd);
+        ESP_LOGI(TAG, "WS client connected: fd=%d", fd);
+        return ESP_OK;
+    }
+
+    /* Data frame — ensure this client is tracked (in case handshake tracking missed it) */
+    int fd = httpd_req_to_sockfd(req);
+    bool found = false;
+    for (int i = 0; i < MAX_WS_CLIENTS; i++) {
+        if (s_ws_clients[i].active && s_ws_clients[i].fd == fd) { found = true; break; }
+    }
+    if (!found) {
+        ws_add_client(fd);
+        ESP_LOGI(TAG, "WS client late-added: fd=%d", fd);
+    }
+
+    httpd_ws_frame_t ws_pkt = { .type = HTTPD_WS_TYPE_BINARY };
+
+    esp_err_t ret = httpd_ws_recv_frame(req, &ws_pkt, 0);
+    if (ret != ESP_OK || ws_pkt.len == 0) return ret;
+
+    uint8_t *buf = malloc(ws_pkt.len);
+    if (!buf) return ESP_ERR_NO_MEM;
+
+    ws_pkt.payload = buf;
+    ret = httpd_ws_recv_frame(req, &ws_pkt, ws_pkt.len);
+    if (ret == ESP_OK) {
+        if (ws_pkt.type == HTTPD_WS_TYPE_TEXT || ws_pkt.type == HTTPD_WS_TYPE_BINARY) {
+            uart_bridge_send(buf, ws_pkt.len);
+        } else if (ws_pkt.type == HTTPD_WS_TYPE_CLOSE) {
+            ws_remove_client(fd);
+        }
+    }
+
+    free(buf);
+    return ret;
+}
+
+// --- Close callback ---
+
+static void on_close(httpd_handle_t hd, int sockfd)
+{
+    ws_remove_client(sockfd);
+    close(sockfd);
+}
+
+// --- Server lifecycle ---
+
+esp_err_t web_server_init(void)
+{
+    memset(s_ws_clients, 0, sizeof(s_ws_clients));
+    return ESP_OK;
+}
+
+esp_err_t web_server_start(void)
+{
+    httpd_ssl_config_t config = HTTPD_SSL_CONFIG_DEFAULT();
+    config.httpd.max_open_sockets = 4;
+    config.httpd.max_uri_handlers = 12;
+    config.httpd.stack_size = 10240;
+    config.httpd.lru_purge_enable = true;
+    config.httpd.close_fn = on_close;
+
+    /* Embedded PEM cert and key (EMBED_TXTFILES adds null terminator) */
+    config.servercert = server_crt_start;
+    config.servercert_len = strlen((const char *)server_crt_start) + 1;
+    config.prvtkey_pem = server_key_start;
+    config.prvtkey_len = strlen((const char *)server_key_start) + 1;
+
+    esp_err_t err = httpd_ssl_start(&s_server, &config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start HTTPS server: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    /* Two static file routes */
+    const httpd_uri_t route_root = { .uri = "/", .method = HTTP_GET, .handler = handle_root };
+    const httpd_uri_t route_xterm = { .uri = "/lib/xterm.min.js", .method = HTTP_GET, .handler = handle_xterm_js };
+
+    /* API routes */
+    const httpd_uri_t route_login = { .uri = "/api/login", .method = HTTP_POST, .handler = handle_login };
+    const httpd_uri_t route_logout = { .uri = "/api/logout", .method = HTTP_POST, .handler = handle_logout };
+    const httpd_uri_t route_config_get = { .uri = "/api/config", .method = HTTP_GET, .handler = handle_config_get };
+    const httpd_uri_t route_config_post = { .uri = "/api/config", .method = HTTP_POST, .handler = handle_config_post };
+    const httpd_uri_t route_reset = { .uri = "/api/reset", .method = HTTP_POST, .handler = handle_reset };
+    const httpd_uri_t route_power = { .uri = "/api/power", .method = HTTP_POST, .handler = handle_power };
+    const httpd_uri_t route_ota = { .uri = "/api/ota", .method = HTTP_POST, .handler = handle_ota };
+
+    /* WebSocket */
+    const httpd_uri_t route_ws = { .uri = "/ws", .method = HTTP_GET, .handler = handle_ws, .is_websocket = true };
+
+    httpd_register_uri_handler(s_server, &route_root);
+    httpd_register_uri_handler(s_server, &route_xterm);
+    httpd_register_uri_handler(s_server, &route_login);
+    httpd_register_uri_handler(s_server, &route_logout);
+    httpd_register_uri_handler(s_server, &route_config_get);
+    httpd_register_uri_handler(s_server, &route_config_post);
+    httpd_register_uri_handler(s_server, &route_reset);
+    httpd_register_uri_handler(s_server, &route_power);
+    httpd_register_uri_handler(s_server, &route_ota);
+    httpd_register_uri_handler(s_server, &route_ws);
+
+    httpd_register_err_handler(s_server, HTTPD_404_NOT_FOUND, handle_404);
+
+    ESP_LOGI(TAG, "HTTPS server started on port 443");
+    return ESP_OK;
+}
+
+void web_server_stop(void)
+{
+    if (s_server) {
+        httpd_ssl_stop(s_server);
+        s_server = NULL;
+    }
+}

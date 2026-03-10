@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ESP32 Web Terminal</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+    --bg: #1a1a2e; --surface: #16213e; --border: #0f3460;
+    --text: #e0e0e0; --accent: #0ea5e9; --danger: #ef4444;
+    --success: #22c55e; --warning: #f59e0b;
+}
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--text);
+    height: 100vh; display: flex; flex-direction: column; overflow: hidden;
+}
+#toolbar {
+    display: flex; align-items: center; gap: 8px; padding: 6px 12px;
+    background: var(--surface); border-bottom: 1px solid var(--border);
+    flex-shrink: 0; flex-wrap: wrap;
+}
+#toolbar .status-dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--danger); flex-shrink: 0;
+}
+#toolbar .status-dot.connected { background: var(--success); }
+#toolbar .status-text { font-size: 13px; margin-right: auto; }
+#toolbar select, #toolbar button {
+    font-size: 13px; padding: 4px 10px; border: 1px solid var(--border);
+    border-radius: 4px; background: var(--bg); color: var(--text); cursor: pointer;
+}
+#toolbar button:hover { border-color: var(--accent); }
+#toolbar button.danger { border-color: var(--danger); color: var(--danger); }
+#toolbar button.danger:hover { background: var(--danger); color: white; }
+#toolbar button.power-on { border-color: var(--success); color: var(--success); }
+#toolbar button.power-off { border-color: var(--danger); color: var(--danger); }
+#terminal-container { flex: 1; padding: 4px; overflow: hidden; }
+#terminal-container .xterm { height: 100%; }
+#login-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.7);
+    display: flex; align-items: center; justify-content: center; z-index: 1000;
+}
+#login-overlay.hidden { display: none; }
+#login-box {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 32px; width: 340px; max-width: 90vw;
+}
+#login-box h2 { margin-bottom: 20px; font-size: 18px; text-align: center; }
+#login-box input {
+    display: block; width: 100%; padding: 8px 12px; margin-bottom: 12px;
+    border: 1px solid var(--border); border-radius: 4px;
+    background: var(--bg); color: var(--text); font-size: 14px;
+}
+#login-box button {
+    display: block; width: 100%; padding: 10px; border: none;
+    border-radius: 4px; background: var(--accent); color: white;
+    font-size: 14px; cursor: pointer;
+}
+#login-box button:hover { opacity: 0.9; }
+#login-error { color: var(--danger); font-size: 13px; margin-bottom: 8px; min-height: 18px; }
+#settings-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.7);
+    display: flex; align-items: center; justify-content: center; z-index: 999;
+}
+#settings-overlay.hidden { display: none; }
+#settings-box {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 24px; width: 380px;
+    max-width: 90vw; max-height: 90vh; overflow-y: auto;
+}
+#settings-box h2 { margin-bottom: 16px; font-size: 18px; text-align: center; }
+#settings-box fieldset {
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 12px; margin-bottom: 12px;
+}
+#settings-box legend { font-size: 13px; color: var(--accent); padding: 0 6px; }
+#settings-box input[type="text"], #settings-box input[type="password"] {
+    display: block; width: 100%; padding: 8px 12px; margin-bottom: 8px;
+    border: 1px solid var(--border); border-radius: 4px;
+    background: var(--bg); color: var(--text); font-size: 14px;
+}
+#settings-box label {
+    font-size: 14px; cursor: pointer; display: flex; align-items: center; gap: 8px;
+}
+#settings-box button {
+    display: block; width: 100%; padding: 8px; border: 1px solid var(--border);
+    border-radius: 4px; background: var(--bg); color: var(--text);
+    font-size: 13px; cursor: pointer; margin-top: 4px;
+}
+#settings-box button:hover { border-color: var(--accent); }
+#btn-settings-close {
+    margin-top: 12px !important; background: var(--accent) !important;
+    border: none !important; color: white !important;
+}
+#settings-status, #wifi-status { font-size: 13px; margin-bottom: 8px; min-height: 16px; }
+#wifi-status { color: var(--success); }
+#settings-status { color: var(--accent); text-align: center; }
+.xterm{cursor:text;position:relative;user-select:none;-ms-user-select:none;-webkit-user-select:none}.xterm.focus,.xterm:focus{outline:0}.xterm .xterm-helpers{position:absolute;top:0;z-index:5}.xterm .xterm-helper-textarea{padding:0;border:0;margin:0;position:absolute;opacity:0;left:-9999em;top:0;width:0;height:0;z-index:-5;white-space:nowrap;overflow:hidden;resize:none}.xterm .composition-view{background:#000;color:#fff;display:none;position:absolute;white-space:nowrap;z-index:1}.xterm .composition-view.active{display:block}.xterm .xterm-viewport{background-color:#000;overflow-y:scroll;cursor:default;position:absolute;right:0;left:0;top:0;bottom:0}.xterm .xterm-screen{position:relative}.xterm .xterm-screen canvas{position:absolute;left:0;top:0}.xterm .xterm-scroll-area{visibility:hidden}.xterm-char-measure-element{display:inline-block;visibility:hidden;position:absolute;top:0;left:-9999em;line-height:normal}.xterm.enable-mouse-events{cursor:default}.xterm .xterm-cursor-pointer,.xterm.xterm-cursor-pointer{cursor:pointer}.xterm.column-select.focus{cursor:crosshair}.xterm .xterm-accessibility:not(.debug),.xterm .xterm-message{position:absolute;left:0;top:0;bottom:0;right:0;z-index:10;color:transparent;pointer-events:none}.xterm .xterm-accessibility-tree:not(.debug) ::selection{color:transparent}.xterm .xterm-accessibility-tree{user-select:text;white-space:pre}.xterm .live-region{position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden}.xterm-dim{opacity:1!important}.xterm-underline-1{text-decoration:underline}.xterm-underline-2{text-decoration:double underline}.xterm-underline-3{text-decoration:wavy underline}.xterm-underline-4{text-decoration:dotted underline}.xterm-underline-5{text-decoration:dashed underline}.xterm-overline{text-decoration:overline}.xterm-overline.xterm-underline-1{text-decoration:overline underline}.xterm-overline.xterm-underline-2{text-decoration:overline double underline}.xterm-overline.xterm-underline-3{text-decoration:overline wavy underline}.xterm-overline.xterm-underline-4{text-decoration:overline dotted underline}.xterm-overline.xterm-underline-5{text-decoration:overline dashed underline}.xterm-strikethrough{text-decoration:line-through}.xterm-screen .xterm-decoration-container .xterm-decoration{z-index:6;position:absolute}.xterm-screen .xterm-decoration-container .xterm-decoration.xterm-decoration-top-layer{z-index:7}.xterm-decoration-overview-ruler{z-index:8;position:absolute;top:0;right:0;pointer-events:none}.xterm-decoration-top{z-index:2;position:relative}
+@media (max-width: 600px) {
+    #toolbar { padding: 4px 8px; gap: 4px; }
+    #toolbar select, #toolbar button { font-size: 12px; padding: 3px 6px; }
+}
+</style>
+</head>
+<body>
+    <div id="login-overlay">
+        <div id="login-box">
+            <h2>ESP32 Web Terminal</h2>
+            <form id="login-form">
+                <input type="text" id="login-user" placeholder="Username" autocomplete="username" required>
+                <input type="password" id="login-pass" placeholder="Password" autocomplete="current-password" required>
+                <div id="login-error"></div>
+                <button type="submit">Login</button>
+            </form>
+        </div>
+    </div>
+
+    <div id="toolbar">
+        <span id="device-title" style="font-weight:bold;margin-right:8px">ESP32 Terminal</span>
+        <span id="status-dot" class="status-dot"></span>
+        <span id="status-text" class="status-text">Disconnected</span>
+        <label for="baud-select" style="font-size:13px">Baud:</label>
+        <select id="baud-select">
+            <option value="9600">9600</option>
+            <option value="19200">19200</option>
+            <option value="38400">38400</option>
+            <option value="57600">57600</option>
+            <option value="115200" selected>115200</option>
+            <option value="230400">230400</option>
+            <option value="460800">460800</option>
+            <option value="921600">921600</option>
+            <option value="1500000">1500000</option>
+        </select>
+        <button id="btn-reset" class="danger">Reset SBC</button>
+        <button id="btn-power" class="power-on">Power: ON</button>
+        <button id="btn-settings">Settings</button>
+        <button id="btn-logout">Logout</button>
+    </div>
+
+    <div id="settings-overlay" class="hidden">
+        <div id="settings-box">
+            <h2>Settings</h2>
+            <div id="settings-status"></div>
+            <fieldset>
+                <legend>Device Name</legend>
+                <input type="text" id="device-name" placeholder="Device Name" autocomplete="off" maxlength="32">
+                <button id="btn-name-save">Save</button>
+            </fieldset>
+            <fieldset id="wifi-fieldset">
+                <legend>WiFi Client (STA)</legend>
+                <div id="wifi-status"></div>
+                <input type="text" id="sta-ssid" placeholder="WiFi SSID" autocomplete="off">
+                <input type="password" id="sta-pass" placeholder="WiFi Password" autocomplete="off">
+                <button id="btn-wifi-save">Connect</button>
+            </fieldset>
+            <fieldset>
+                <legend>Change Password</legend>
+                <input type="password" id="new-pass" placeholder="New password" autocomplete="new-password">
+                <input type="password" id="new-pass2" placeholder="Confirm password" autocomplete="new-password">
+                <button id="btn-pass-save">Change Password</button>
+            </fieldset>
+            <fieldset>
+                <legend>NTP Server</legend>
+                <div id="ntp-status" style="font-size:13px;margin-bottom:8px;min-height:16px"></div>
+                <input type="text" id="ntp-server" placeholder="Leave empty for DHCP" autocomplete="off" maxlength="64">
+                <button id="btn-ntp-save">Save</button>
+                <div style="font-size:11px;color:var(--dim);margin-top:4px">Empty = use DHCP-provided server (fallback: pool.ntp.org)</div>
+            </fieldset>
+            <fieldset>
+                <legend>Power</legend>
+                <label><input type="checkbox" id="power-default"> Power on SBC at boot</label>
+            </fieldset>
+            <fieldset>
+                <legend>Firmware Update</legend>
+                <input type="file" id="ota-file" accept=".bin" style="margin-bottom:8px;font-size:13px">
+                <button id="btn-ota-upload">Upload Firmware</button>
+                <div id="ota-status" style="font-size:13px;margin-top:8px;min-height:16px"></div>
+                <div id="ota-progress" style="display:none;margin-top:4px">
+                    <div style="background:var(--bg);border:1px solid var(--border);border-radius:4px;height:20px;overflow:hidden">
+                        <div id="ota-bar" style="background:var(--accent);height:100%;width:0%;transition:width 0.3s"></div>
+                    </div>
+                </div>
+            </fieldset>
+            <button id="btn-settings-close">Close</button>
+        </div>
+    </div>
+
+    <div id="terminal-container"></div>
+
+    <!-- FitAddon inlined - must be before app code -->
+    <script>
+window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){const e=this.proposeDimensions();if(!e||!this._terminal||isNaN(e.cols)||isNaN(e.rows))return;const t=this._terminal._core;this._terminal.rows===e.rows&&this._terminal.cols===e.cols||(t._renderService.clear(),this._terminal.resize(e.cols,e.rows))}proposeDimensions(){if(!this._terminal)return;if(!this._terminal.element||!this._terminal.element.parentElement)return;const e=this._terminal._core,t=e._renderService.dimensions;if(0===t.css.cell.width||0===t.css.cell.height)return;const r=0===this._terminal.options.scrollback?0:e.viewport.scrollBarWidth,i=window.getComputedStyle(this._terminal.element.parentElement),o=parseInt(i.getPropertyValue("height")),s=Math.max(0,parseInt(i.getPropertyValue("width"))),n=window.getComputedStyle(this._terminal.element),l=o-(parseInt(n.getPropertyValue("padding-top"))+parseInt(n.getPropertyValue("padding-bottom"))),a=s-(parseInt(n.getPropertyValue("padding-right"))+parseInt(n.getPropertyValue("padding-left")))-r;return{cols:Math.max(2,Math.floor(a/t.css.cell.width)),rows:Math.max(1,Math.floor(l/t.css.cell.height))}}}};
+    </script>
+
+    <script>
+(function() {
+    "use strict";
+
+    var ws = null;
+    var term = null;
+    var fitAddon = null;
+    var sessionToken = null;
+    var reconnectTimer = null;
+
+    var statusDot = document.getElementById("status-dot");
+    var statusText = document.getElementById("status-text");
+    var baudSelect = document.getElementById("baud-select");
+    var loginOverlay = document.getElementById("login-overlay");
+    var loginError = document.getElementById("login-error");
+    var settingsOverlay = document.getElementById("settings-overlay");
+    var settingsStatus = document.getElementById("settings-status");
+    var wifiStatus = document.getElementById("wifi-status");
+    var terminalContainer = document.getElementById("terminal-container");
+    var btnPower = document.getElementById("btn-power");
+
+    // --- Helpers ---
+
+    function setStatus(connected, text) {
+        statusDot.classList.toggle("connected", connected);
+        statusText.textContent = text;
+    }
+
+    function api(method, url, data, cb) {
+        var xhr = new XMLHttpRequest();
+        xhr.open(method, url, true);
+        xhr.setRequestHeader("Content-Type", "application/json");
+        if (sessionToken) xhr.setRequestHeader("Authorization", "Bearer " + sessionToken);
+        xhr.onload = function() {
+            try { cb(null, JSON.parse(xhr.responseText), xhr.status); }
+            catch(e) { cb(e); }
+        };
+        xhr.onerror = function() { cb(new Error("Network error")); };
+        xhr.send(data ? JSON.stringify(data) : null);
+    }
+
+    function showSettingsMsg(msg, isError) {
+        settingsStatus.textContent = msg;
+        settingsStatus.style.color = isError ? "var(--danger)" : "var(--success)";
+    }
+
+    // --- Terminal ---
+
+    function initTerminal() {
+        if (term || typeof Terminal === "undefined" || typeof FitAddon === "undefined") return;
+
+        term = new Terminal({
+            cursorBlink: true, fontSize: 14,
+            fontFamily: "'Fira Code', 'Cascadia Code', Menlo, monospace",
+            theme: { background: "#1a1a2e", foreground: "#e0e0e0", cursor: "#0ea5e9" },
+            scrollback: 5000, convertEol: true,
+        });
+        fitAddon = new FitAddon.FitAddon();
+        term.loadAddon(fitAddon);
+        term.open(terminalContainer);
+        fitAddon.fit();
+
+        term.onData(function(data) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(new TextEncoder().encode(data));
+            }
+        });
+
+        window.addEventListener("resize", function() { if (fitAddon) fitAddon.fit(); });
+
+        // If already logged in, connect now
+        if (sessionToken) connectWs();
+    }
+
+    // --- WebSocket (only called after terminal is ready) ---
+
+    function connectWs() {
+        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+        if (!sessionToken || !term) return;
+
+        var proto = location.protocol === "https:" ? "wss:" : "ws:";
+        ws = new WebSocket(proto + "//" + location.host + "/ws?token=" + encodeURIComponent(sessionToken));
+        ws.binaryType = "arraybuffer";
+
+        ws.onopen = function() { setStatus(true, "Connected"); };
+        ws.onmessage = function(evt) {
+            if (evt.data instanceof ArrayBuffer) {
+                term.write(new Uint8Array(evt.data));
+            } else {
+                term.write(evt.data);
+            }
+        };
+        ws.onclose = function() {
+            setStatus(false, "Disconnected");
+            if (sessionToken) reconnectTimer = setTimeout(connectWs, 3000);
+        };
+        ws.onerror = function() { setStatus(false, "Connection error"); };
+    }
+
+    // --- Auth ---
+
+    function onLoginSuccess(data) {
+        sessionToken = data.token;
+        loginOverlay.classList.add("hidden");
+        loadConfig();
+        // connectWs is called by initTerminal or after xterm loads
+        if (term) {
+            connectWs();
+            if (data.must_change_password) {
+                term.writeln("\r\n*** Default credentials. Change password in Settings. ***\r\n");
+            }
+        }
+    }
+
+    document.getElementById("login-form").addEventListener("submit", function(e) {
+        e.preventDefault();
+        loginError.textContent = "";
+        var u = document.getElementById("login-user").value;
+        var p = document.getElementById("login-pass").value;
+        api("POST", "/api/login", {username: u, password: p}, function(err, data, status) {
+            if (err || status !== 200) {
+                loginError.textContent = (data && data.error) || "Login failed";
+                return;
+            }
+            onLoginSuccess(data);
+        });
+    });
+
+    document.getElementById("btn-logout").addEventListener("click", function() {
+        api("POST", "/api/logout", null, function() {
+            sessionToken = null;
+            if (ws) ws.close();
+            loginOverlay.classList.remove("hidden");
+        });
+    });
+
+    // --- Config ---
+
+    function loadConfig() {
+        api("GET", "/api/config", null, function(err, conf) {
+            if (err || !conf) return;
+            if (conf.baud_rate) baudSelect.value = String(conf.baud_rate);
+            updatePowerButton(conf.power_on);
+            if (conf.device_name) {
+                document.title = conf.device_name;
+                document.getElementById("device-title").textContent = conf.device_name;
+            }
+        });
+    }
+
+    function updatePowerButton(on) {
+        btnPower.textContent = on ? "Power: ON" : "Power: OFF";
+        btnPower.classList.toggle("power-on", on);
+        btnPower.classList.toggle("power-off", !on);
+    }
+
+    baudSelect.addEventListener("change", function() {
+        var baud = parseInt(baudSelect.value, 10);
+        api("POST", "/api/config", {baud_rate: baud}, function(err, res) {
+            if (!err && res && res.ok && term)
+                term.writeln("\r\n[Baud rate changed to " + baud + "]\r\n");
+        });
+    });
+
+    // --- GPIO ---
+
+    document.getElementById("btn-reset").addEventListener("click", function() {
+        if (!confirm("Reset the SBC?")) return;
+        api("POST", "/api/reset", null, function(err, res) {
+            if (!err && res && res.ok && term) term.writeln("\r\n[SBC reset triggered]\r\n");
+        });
+    });
+
+    btnPower.addEventListener("click", function() {
+        api("POST", "/api/power", {}, function(err, res) {
+            if (!err && res && res.ok) {
+                updatePowerButton(res.power_on);
+                if (term) term.writeln("\r\n[SBC power " + (res.power_on ? "ON" : "OFF") + "]\r\n");
+            }
+        });
+    });
+
+    // --- Settings ---
+
+    document.getElementById("btn-settings").addEventListener("click", function() {
+        settingsOverlay.classList.remove("hidden");
+        settingsStatus.textContent = "";
+        api("GET", "/api/config", null, function(err, conf) {
+            if (err || !conf) return;
+            document.getElementById("sta-ssid").value = conf.sta_ssid || "";
+            document.getElementById("sta-pass").value = "";
+            document.getElementById("power-default").checked = conf.power_on_default;
+            document.getElementById("device-name").value = conf.device_name || "";
+            document.getElementById("ntp-server").value = conf.ntp_server || "";
+            var ntpEl = document.getElementById("ntp-status");
+            if (conf.ntp_synced) {
+                ntpEl.textContent = "Synced: " + conf.ntp_active_server;
+                ntpEl.style.color = "var(--success)";
+            } else {
+                ntpEl.textContent = "Waiting for sync... (" + conf.ntp_active_server + ")";
+                ntpEl.style.color = "var(--warning)";
+            }
+            document.title = conf.device_name || "ESP32 Terminal";
+            document.getElementById("device-title").textContent = conf.device_name || "ESP32 Terminal";
+            var wifiFieldset = document.getElementById("wifi-fieldset");
+            if (conf.sta_connected) {
+                wifiFieldset.style.display = "none";
+            } else {
+                wifiFieldset.style.display = "";
+                if (conf.wifi_mode === "ap") {
+                    wifiStatus.textContent = "Mode: AP only";
+                } else {
+                    wifiStatus.textContent = "Disconnected from " + conf.sta_ssid;
+                    wifiStatus.style.color = "var(--warning)";
+                }
+            }
+        });
+    });
+
+    document.getElementById("btn-settings-close").addEventListener("click", function() {
+        settingsOverlay.classList.add("hidden");
+    });
+
+    document.getElementById("btn-ntp-save").addEventListener("click", function() {
+        var server = document.getElementById("ntp-server").value.trim();
+        api("POST", "/api/config", {ntp_server: server}, function(err, res) {
+            showSettingsMsg(!err && res && res.ok ? "NTP server saved (reboot to apply)" : ((res && res.error) || "Failed"), !(!err && res && res.ok));
+        });
+    });
+
+    document.getElementById("btn-name-save").addEventListener("click", function() {
+        var name = document.getElementById("device-name").value.trim();
+        if (!name) { showSettingsMsg("Name required", true); return; }
+        api("POST", "/api/config", {device_name: name}, function(err, res) {
+            if (!err && res && res.ok) {
+                showSettingsMsg("Device name saved");
+                document.title = name;
+                document.getElementById("device-title").textContent = name;
+            } else {
+                showSettingsMsg((res && res.error) || "Failed", true);
+            }
+        });
+    });
+
+    document.getElementById("btn-wifi-save").addEventListener("click", function() {
+        var ssid = document.getElementById("sta-ssid").value.trim();
+        var pass = document.getElementById("sta-pass").value;
+        if (!ssid) { showSettingsMsg("SSID required", true); return; }
+        api("POST", "/api/config", {sta_ssid: ssid, sta_pass: pass}, function(err, res) {
+            showSettingsMsg(!err && res && res.ok ? "Connecting to " + ssid + "..." : ((res && res.error) || "Failed"), !(!err && res && res.ok));
+        });
+    });
+
+    document.getElementById("btn-pass-save").addEventListener("click", function() {
+        var p1 = document.getElementById("new-pass").value;
+        var p2 = document.getElementById("new-pass2").value;
+        if (!p1 || p1.length < 4) { showSettingsMsg("Min 4 characters", true); return; }
+        if (p1 !== p2) { showSettingsMsg("Passwords don't match", true); return; }
+        api("POST", "/api/config", {new_password: p1}, function(err, res) {
+            if (!err && res && res.ok) {
+                showSettingsMsg("Password changed");
+                document.getElementById("new-pass").value = "";
+                document.getElementById("new-pass2").value = "";
+            } else {
+                showSettingsMsg((res && res.error) || "Failed", true);
+            }
+        });
+    });
+
+    document.getElementById("power-default").addEventListener("change", function() {
+        api("POST", "/api/config", {power_on_default: this.checked}, function(err, res) {
+            if (!err && res && res.ok) showSettingsMsg("Saved");
+        });
+    });
+
+    // --- OTA ---
+
+    document.getElementById("btn-ota-upload").addEventListener("click", function() {
+        var fileInput = document.getElementById("ota-file");
+        var otaStatus = document.getElementById("ota-status");
+        var otaProgress = document.getElementById("ota-progress");
+        var otaBar = document.getElementById("ota-bar");
+        var file = fileInput.files[0];
+
+        if (!file) { otaStatus.textContent = "Select a .bin file first"; otaStatus.style.color = "var(--danger)"; return; }
+        if (!file.name.endsWith(".bin")) { otaStatus.textContent = "File must be a .bin firmware"; otaStatus.style.color = "var(--danger)"; return; }
+        if (!confirm("Upload " + file.name + " (" + (file.size / 1024).toFixed(0) + " KB)? The device will reboot after update.")) return;
+
+        otaStatus.textContent = "Uploading...";
+        otaStatus.style.color = "var(--accent)";
+        otaProgress.style.display = "block";
+        otaBar.style.width = "0%";
+
+        var xhr = new XMLHttpRequest();
+        xhr.open("POST", "/api/ota", true);
+        xhr.setRequestHeader("Content-Type", "application/octet-stream");
+        if (sessionToken) xhr.setRequestHeader("Authorization", "Bearer " + sessionToken);
+
+        xhr.upload.onprogress = function(e) {
+            if (e.lengthComputable) {
+                var pct = Math.round((e.loaded / e.total) * 100);
+                otaBar.style.width = pct + "%";
+                otaStatus.textContent = "Uploading... " + pct + "%";
+            }
+        };
+
+        xhr.onload = function() {
+            try {
+                var res = JSON.parse(xhr.responseText);
+                if (xhr.status === 200 && res.ok) {
+                    otaStatus.textContent = "Update complete! Device is rebooting...";
+                    otaStatus.style.color = "var(--success)";
+                    otaBar.style.width = "100%";
+                    setTimeout(function() { location.reload(); }, 10000);
+                } else {
+                    otaStatus.textContent = res.error || "Update failed";
+                    otaStatus.style.color = "var(--danger)";
+                }
+            } catch(e) {
+                otaStatus.textContent = "Update failed (device may be rebooting)";
+                otaStatus.style.color = "var(--warning)";
+                setTimeout(function() { location.reload(); }, 10000);
+            }
+        };
+
+        xhr.onerror = function() {
+            otaStatus.textContent = "Upload failed - connection error (device may be rebooting)";
+            otaStatus.style.color = "var(--warning)";
+            setTimeout(function() { location.reload(); }, 10000);
+        };
+
+        xhr.send(file);
+    });
+
+    // --- Startup ---
+
+    // 1. Check if already authenticated (cookie from previous session)
+    api("GET", "/api/config", null, function(err, conf, status) {
+        if (!err && status === 200 && conf) {
+            sessionToken = "cookie";
+            loginOverlay.classList.add("hidden");
+            if (conf.baud_rate) baudSelect.value = String(conf.baud_rate);
+            updatePowerButton(conf.power_on);
+            // connectWs will be called once xterm loads
+        }
+    });
+
+    // 2. Load xterm.js dynamically (doesn't block anything)
+    //    FitAddon is already inlined below.
+    var xtermScript = document.createElement("script");
+    xtermScript.src = "/lib/xterm.min.js";
+    xtermScript.onload = function() { initTerminal(); };
+    xtermScript.onerror = function() {
+        // Retry once after 2 seconds
+        setTimeout(function() {
+            var retry = document.createElement("script");
+            retry.src = "/lib/xterm.min.js";
+            retry.onload = function() { initTerminal(); };
+            document.head.appendChild(retry);
+        }, 2000);
+    };
+    document.head.appendChild(xtermScript);
+
+})();
+    </script>
+</body>
+</html>
