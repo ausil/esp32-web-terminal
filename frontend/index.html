@@ -119,6 +119,7 @@ body {
 
     <div id="toolbar">
         <span id="device-title" style="font-weight:bold;margin-right:8px">ESP32 Terminal</span>
+        <span id="fw-version" style="font-size:11px;color:var(--dim);margin-right:8px"></span>
         <span id="status-dot" class="status-dot"></span>
         <span id="status-text" class="status-text">Disconnected</span>
         <label for="baud-select" style="font-size:13px">Baud:</label>
@@ -155,6 +156,7 @@ body {
                 <input type="text" id="sta-ssid" placeholder="WiFi SSID" autocomplete="off">
                 <input type="password" id="sta-pass" placeholder="WiFi Password" autocomplete="off">
                 <button id="btn-wifi-save">Connect</button>
+                <button id="btn-wifi-disconnect" class="danger" style="display:none;margin-top:8px">Disconnect WiFi</button>
             </fieldset>
             <fieldset>
                 <legend>Change Password</legend>
@@ -168,6 +170,26 @@ body {
                 <input type="text" id="ntp-server" placeholder="Leave empty for DHCP" autocomplete="off" maxlength="64">
                 <button id="btn-ntp-save">Save</button>
                 <div style="font-size:11px;color:var(--dim);margin-top:4px">Empty = use DHCP-provided server (fallback: pool.ntp.org)</div>
+            </fieldset>
+            <fieldset>
+                <legend>Timezone</legend>
+                <select id="tz-select" style="width:100%;margin-bottom:8px">
+                    <option value="UTC0">UTC</option>
+                    <option value="EST5EDT,M3.2.0,M11.1.0">US Eastern</option>
+                    <option value="CST6CDT,M3.2.0,M11.1.0">US Central</option>
+                    <option value="MST7MDT,M3.2.0,M11.1.0">US Mountain</option>
+                    <option value="PST8PDT,M3.2.0,M11.1.0">US Pacific</option>
+                    <option value="GMT0BST,M3.5.0/1,M10.5.0">UK</option>
+                    <option value="CET-1CEST,M3.5.0,M10.5.0/3">Central Europe</option>
+                    <option value="EET-2EEST,M3.5.0/3,M10.5.0/4">Eastern Europe</option>
+                    <option value="JST-9">Japan</option>
+                    <option value="CST-8">China</option>
+                    <option value="IST-5:30">India</option>
+                    <option value="AEST-10AEDT,M10.1.0,M4.1.0/3">Australia Eastern</option>
+                    <option value="NZST-12NZDT,M9.5.0,M4.1.0/3">New Zealand</option>
+                </select>
+                <input type="text" id="tz-custom" placeholder="Or enter POSIX TZ string" autocomplete="off" maxlength="40" style="margin-bottom:8px">
+                <button id="btn-tz-save">Save</button>
             </fieldset>
             <fieldset>
                 <legend>Power</legend>
@@ -262,8 +284,21 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
         fitAddon.fit();
 
         term.onData(function(data) {
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(new TextEncoder().encode(data));
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+            var encoded = new TextEncoder().encode(data);
+            // Throttle large pastes to avoid UART buffer overflow
+            if (encoded.length <= 64) {
+                ws.send(encoded);
+            } else {
+                var chunk = 64;
+                var i = 0;
+                function sendChunk() {
+                    if (i >= encoded.length) return;
+                    ws.send(encoded.slice(i, i + chunk));
+                    i += chunk;
+                    setTimeout(sendChunk, 10);
+                }
+                sendChunk();
             }
         });
 
@@ -345,6 +380,9 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
             if (conf.device_name) {
                 document.title = conf.device_name;
                 document.getElementById("device-title").textContent = conf.device_name;
+            }
+            if (conf.firmware_version) {
+                document.getElementById("fw-version").textContent = "v" + conf.firmware_version;
             }
         });
     }
@@ -447,9 +485,20 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
             document.title = conf.device_name || "ESP32 Terminal";
             document.getElementById("device-title").textContent = conf.device_name || "ESP32 Terminal";
             var wifiFieldset = document.getElementById("wifi-fieldset");
+            var btnDisconnect = document.getElementById("btn-wifi-disconnect");
             if (conf.sta_connected) {
-                wifiFieldset.style.display = "none";
+                wifiStatus.textContent = "Connected: " + conf.sta_ssid + " (" + conf.sta_ip + ")";
+                wifiStatus.style.color = "var(--success)";
+                document.getElementById("sta-ssid").style.display = "none";
+                document.getElementById("sta-pass").style.display = "none";
+                document.getElementById("btn-wifi-save").style.display = "none";
+                btnDisconnect.style.display = "";
+                wifiFieldset.style.display = "";
             } else {
+                document.getElementById("sta-ssid").style.display = "";
+                document.getElementById("sta-pass").style.display = "";
+                document.getElementById("btn-wifi-save").style.display = "";
+                btnDisconnect.style.display = "none";
                 wifiFieldset.style.display = "";
                 if (conf.wifi_mode === "ap") {
                     wifiStatus.textContent = "Mode: AP only";
@@ -458,6 +507,16 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
                     wifiStatus.style.color = "var(--warning)";
                 }
             }
+            // Timezone
+            var tzSelect = document.getElementById("tz-select");
+            var tzCustom = document.getElementById("tz-custom");
+            var tzVal = conf.timezone || "UTC0";
+            var found = false;
+            for (var i = 0; i < tzSelect.options.length; i++) {
+                if (tzSelect.options[i].value === tzVal) { tzSelect.selectedIndex = i; found = true; break; }
+            }
+            if (!found) { tzSelect.selectedIndex = 0; tzCustom.value = tzVal; }
+            else { tzCustom.value = ""; }
         });
     });
 
@@ -492,6 +551,21 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
         if (!ssid) { showSettingsMsg("SSID required", true); return; }
         api("POST", "/api/config", {sta_ssid: ssid, sta_pass: pass}, function(err, res) {
             showSettingsMsg(!err && res && res.ok ? "Connecting to " + ssid + "..." : ((res && res.error) || "Failed"), !(!err && res && res.ok));
+        });
+    });
+
+    document.getElementById("btn-wifi-disconnect").addEventListener("click", function() {
+        if (!confirm("Disconnect WiFi and switch to AP mode? You will need to reconnect via the AP.")) return;
+        api("POST", "/api/config", {wifi_disconnect: true}, function(err, res) {
+            showSettingsMsg(!err && res && res.ok ? "Disconnected. Switching to AP mode..." : ((res && res.error) || "Failed"), !(!err && res && res.ok));
+        });
+    });
+
+    document.getElementById("btn-tz-save").addEventListener("click", function() {
+        var custom = document.getElementById("tz-custom").value.trim();
+        var tz = custom || document.getElementById("tz-select").value;
+        api("POST", "/api/config", {timezone: tz}, function(err, res) {
+            showSettingsMsg(!err && res && res.ok ? "Timezone saved" : ((res && res.error) || "Failed"), !(!err && res && res.ok));
         });
     });
 
@@ -604,6 +678,13 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
         }, 2000);
     };
     document.head.appendChild(xtermScript);
+
+    // 3. Warn before leaving page during active session
+    window.addEventListener("beforeunload", function(e) {
+        if (sessionToken && ws && ws.readyState === WebSocket.OPEN) {
+            e.preventDefault();
+        }
+    });
 
 })();
     </script>

@@ -18,5 +18,6 @@ typedef struct {
 
 esp_err_t wifi_manager_init(void);
 esp_err_t wifi_manager_connect_sta(const char *ssid, const char *password);
+esp_err_t wifi_manager_disconnect_sta(void);
 void wifi_manager_update_hostname(const char *device_name);
 wifi_manager_status_t wifi_manager_get_status(void);

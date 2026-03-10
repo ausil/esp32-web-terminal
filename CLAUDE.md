@@ -52,7 +52,7 @@ certs/
 - `POST /api/login` — authenticate, returns session token
 - `POST /api/logout` — invalidate session
 - `GET /api/config` — current config (baud, WiFi, power, device name, NTP status)
-- `POST /api/config` — update config (baud_rate, sta_ssid/sta_pass, new_password, device_name, ntp_server, power_on_default)
+- `POST /api/config` — update config (baud_rate, sta_ssid/sta_pass, new_password, device_name, ntp_server, timezone, wifi_disconnect, power_on_default)
 - `POST /api/reset` — trigger SBC reset via GPIO
 - `POST /api/power` — toggle SBC power via GPIO
 - `POST /api/ota` — upload firmware binary for OTA update
@@ -92,6 +92,9 @@ certs/
 - Task watchdog: 10s timeout, panic (reboot) on hang
 - OTA rollback: firmware marked valid at end of app_main after all subsystems init
 - NTP: DHCP server discovery with pool.ntp.org fallback, optional manual override
+- Timezone: POSIX TZ string stored in NVS, applied via setenv("TZ")/tzset()
+- CORS: API responses set Access-Control-Allow-Origin: null and X-Content-Type-Options: nosniff
+- Paste throttle: large pastes chunked at 64 bytes / 10ms in frontend
 
 ## Conventions
 

@@ -91,12 +91,19 @@ void web_server_ws_broadcast(const uint8_t *data, size_t len)
 
 // --- Helpers ---
 
+static void set_cors_headers(httpd_req_t *req)
+{
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "null");
+    httpd_resp_set_hdr(req, "X-Content-Type-Options", "nosniff");
+}
+
 static esp_err_t send_json_error(httpd_req_t *req, int status, const char *message)
 {
     httpd_resp_set_status(req, status == 401 ? "401 Unauthorized" :
                                 status == 429 ? "429 Too Many Requests" :
                                 "400 Bad Request");
     httpd_resp_set_type(req, "application/json");
+    set_cors_headers(req);
     char buf[128];
     snprintf(buf, sizeof(buf), "{\"error\":\"%s\"}", message);
     return httpd_resp_send(req, buf, strlen(buf));
@@ -258,6 +265,7 @@ static esp_err_t handle_sysinfo(httpd_req_t *req)
     char *json_str = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     httpd_resp_set_type(req, "application/json");
+    set_cors_headers(req);
     esp_err_t ret = httpd_resp_send(req, json_str, strlen(json_str));
     free(json_str);
     return ret;
@@ -287,10 +295,13 @@ static esp_err_t handle_config_get(httpd_req_t *req)
     cJSON_AddStringToObject(root, "ntp_server", conf->ntp_server);
     cJSON_AddStringToObject(root, "ntp_active_server", ntp_get_server());
     cJSON_AddBoolToObject(root, "ntp_synced", ntp_is_synced());
+    cJSON_AddStringToObject(root, "timezone", conf->timezone);
+    cJSON_AddStringToObject(root, "firmware_version", esp_app_get_description()->version);
 
     char *json_str = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     httpd_resp_set_type(req, "application/json");
+    set_cors_headers(req);
     esp_err_t ret = httpd_resp_send(req, json_str, strlen(json_str));
     free(json_str);
     return ret;
@@ -335,6 +346,18 @@ static esp_err_t handle_config_post(httpd_req_t *req)
     const cJSON *ntp = cJSON_GetObjectItem(json, "ntp_server");
     if (ntp && cJSON_IsString(ntp)) {
         config_set_ntp_server(ntp->valuestring);
+    }
+
+    const cJSON *tz = cJSON_GetObjectItem(json, "timezone");
+    if (cJSON_IsString(tz)) {
+        config_set_timezone(tz->valuestring);
+        setenv("TZ", tz->valuestring, 1);
+        tzset();
+    }
+
+    const cJSON *wifi_disconnect = cJSON_GetObjectItem(json, "wifi_disconnect");
+    if (cJSON_IsTrue(wifi_disconnect)) {
+        wifi_manager_disconnect_sta();
     }
 
     const cJSON *new_pass = cJSON_GetObjectItem(json, "new_password");

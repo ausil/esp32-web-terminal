@@ -18,6 +18,8 @@
 #define CONFIG_DEVICE_NAME_MAX_LEN  32
 #define CONFIG_DEFAULT_DEVICE_NAME  "ESP32 Terminal"
 #define CONFIG_NTP_SERVER_MAX_LEN   64
+#define CONFIG_TIMEZONE_MAX_LEN    40
+#define CONFIG_DEFAULT_TIMEZONE    "UTC0"
 
 typedef struct {
     char sta_ssid[CONFIG_WIFI_SSID_MAX_LEN + 1];
@@ -32,6 +34,7 @@ typedef struct {
     bool auth_initialized;  // true after first password change
     char device_name[CONFIG_DEVICE_NAME_MAX_LEN + 1];
     char ntp_server[CONFIG_NTP_SERVER_MAX_LEN + 1];  // empty = use DHCP
+    char timezone[CONFIG_TIMEZONE_MAX_LEN + 1];     // POSIX TZ string
 } app_config_t;
 
 esp_err_t config_init(void);
@@ -43,4 +46,5 @@ esp_err_t config_set_power_on_default(bool power_on);
 esp_err_t config_set_auth(const char *username, const char *password);
 esp_err_t config_set_device_name(const char *name);
 esp_err_t config_set_ntp_server(const char *server);
+esp_err_t config_set_timezone(const char *tz);
 bool config_check_password(const char *password);

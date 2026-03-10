@@ -15,6 +15,7 @@ A web-based serial terminal for single-board computers (Raspberry Pi, BeagleBone
 - **Device identification** — configurable device name shown in UI, browser tab, DHCP hostname, and mDNS
 - **mDNS** — access your device at `<device-name>.local` (e.g., `Pi-Rack-1.local`)
 - **NTP time sync** — automatic time from DHCP-provided NTP server, manual server override available
+- **Timezone support** — configurable timezone with preset selections or custom POSIX TZ string
 - **Persistent configuration** — all settings stored in NVS flash
 - **Session log download** — save terminal scrollback to a timestamped `.log` file
 - **System info** — firmware version, chip info, heap usage, uptime visible in Settings
@@ -99,8 +100,9 @@ Once logged in, you'll see a full terminal connected to your SBC's serial port. 
 - **Baud rate** — select from the dropdown to change serial speed (takes effect immediately)
 - **Reset SBC** — sends a reset pulse via GPIO22
 - **Power** — toggles SBC power via GPIO23
+- **Firmware version** — shown in the toolbar
 - **Save Log** — download terminal scrollback as a `.log` file
-- **Settings** — device name, WiFi, NTP, password, power-on default, system info, OTA firmware update
+- **Settings** — device name, WiFi (connect/disconnect), NTP, timezone, password, power-on default, system info, OTA firmware update
 - **Logout** — ends your session
 
 ### WiFi Modes
@@ -111,7 +113,7 @@ Once logged in, you'll see a full terminal connected to your SBC's serial port. 
 | AP+STA | Connecting to STA or STA failed       | Both AP and STA IPs      |
 | STA    | Successfully connected to WiFi        | `https://<IP>` or `https://<name>.local` |
 
-When STA is connected, the AP is disabled to avoid broadcasting. If STA drops, the AP re-enables automatically and a watchdog retries STA every 30 seconds.
+When STA is connected, the AP is disabled to avoid broadcasting. If STA drops, the AP re-enables automatically and a watchdog retries STA every 30 seconds. You can also manually disconnect WiFi from Settings to return to AP mode.
 
 ### Multiple Devices
 
@@ -152,11 +154,13 @@ All fields are optional; include only what you want to change:
 | `new_password`    | string  | New login password             |
 | `device_name`     | string  | Device identifier              |
 | `ntp_server`      | string  | NTP server (empty = use DHCP)  |
+| `timezone`        | string  | POSIX TZ string (e.g., `EST5EDT,M3.2.0,M11.1.0`) |
+| `wifi_disconnect` | boolean | Set true to disconnect STA and switch to AP |
 | `power_on_default`| boolean | Power on SBC at boot           |
 
 ### Config GET response
 
-Returns current state including: `baud_rate`, `power_on`, `power_on_default`, `sta_ssid`, `sta_connected`, `sta_ip`, `ap_ip`, `wifi_mode`, `auth_initialized`, `device_name`, `ntp_server`, `ntp_active_server`, `ntp_synced`.
+Returns current state including: `baud_rate`, `power_on`, `power_on_default`, `sta_ssid`, `sta_connected`, `sta_ip`, `ap_ip`, `wifi_mode`, `auth_initialized`, `device_name`, `ntp_server`, `ntp_active_server`, `ntp_synced`, `timezone`, `firmware_version`.
 
 ### Sysinfo GET response
 
@@ -169,6 +173,9 @@ Returns: `chip`, `cores`, `revision`, `firmware_version`, `idf_version`, `build_
 - **Session management** — up to 4 concurrent sessions, each with a 1-hour timeout. Sessions use 32-byte random tokens.
 - **Rate limiting** — after 5 failed login attempts, login is locked out for 5 minutes.
 - **Default credentials** — `admin`/`admin` with forced password change on first login.
+- **CORS** — API responses restrict cross-origin access.
+- **Paste throttling** — large pastes are chunked (64 bytes at 10ms intervals) to avoid UART buffer overflow.
+- **Navigation guard** — browser warns before closing an active terminal session.
 - **Watchdog** — task watchdog (10s timeout) reboots the device if the system hangs.
 - **OTA rollback** — bad firmware is automatically reverted by the bootloader.
 

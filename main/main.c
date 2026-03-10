@@ -51,6 +51,12 @@ static void ntp_sync_cb(struct timeval *tv)
 static void ntp_init(void)
 {
     app_config_t *conf = config_get();
+
+    // Set timezone
+    setenv("TZ", conf->timezone, 1);
+    tzset();
+    ESP_LOGI(TAG, "Timezone: %s", conf->timezone);
+
     esp_sntp_config_t ntp_config = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
     ntp_config.sync_cb = ntp_sync_cb;
 

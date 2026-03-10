@@ -294,6 +294,36 @@ esp_err_t wifi_manager_connect_sta(const char *ssid, const char *password)
     return ESP_OK;
 }
 
+esp_err_t wifi_manager_disconnect_sta(void)
+{
+    // Stop reconnect watchdog
+    if (s_reconnect_timer) {
+        xTimerStop(s_reconnect_timer, 0);
+    }
+
+    // Clear STA config
+    config_set_wifi_sta("", "");
+
+    // Switch to AP-only
+    esp_wifi_disconnect();
+    esp_wifi_stop();
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
+    s_status.mode = WIFI_MGR_MODE_AP;
+    s_status.sta_connected = false;
+    memset(s_status.sta_ip, 0, sizeof(s_status.sta_ip));
+
+    app_config_t *conf = config_get();
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
+    char ap_ssid[40];
+    snprintf(ap_ssid, sizeof(ap_ssid), "%s-%02X%02X", conf->ap_ssid, mac[4], mac[5]);
+    start_ap(ap_ssid, conf->ap_pass);
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    ESP_LOGI(TAG, "STA disconnected, switched to AP-only mode");
+    return ESP_OK;
+}
+
 wifi_manager_status_t wifi_manager_get_status(void)
 {
     return s_status;

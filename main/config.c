@@ -57,6 +57,7 @@ esp_err_t config_init(void)
         s_config.power_on_default = true;
         s_config.auth_initialized = false;
         strncpy(s_config.device_name, CONFIG_DEFAULT_DEVICE_NAME, sizeof(s_config.device_name) - 1);
+        strncpy(s_config.timezone, CONFIG_DEFAULT_TIMEZONE, sizeof(s_config.timezone) - 1);
 
         // Set default auth credentials
         strncpy(s_config.auth_user, CONFIG_DEFAULT_AUTH_USER, sizeof(s_config.auth_user) - 1);
@@ -74,6 +75,7 @@ esp_err_t config_init(void)
     load_string(nvs, "auth_user", s_config.auth_user, sizeof(s_config.auth_user), CONFIG_DEFAULT_AUTH_USER);
     load_string(nvs, "dev_name", s_config.device_name, sizeof(s_config.device_name), CONFIG_DEFAULT_DEVICE_NAME);
     load_string(nvs, "ntp_srv", s_config.ntp_server, sizeof(s_config.ntp_server), "");
+    load_string(nvs, "timezone", s_config.timezone, sizeof(s_config.timezone), CONFIG_DEFAULT_TIMEZONE);
 
     uint32_t baud = 0;
     if (nvs_get_u32(nvs, "baud_rate", &baud) == ESP_OK) {
@@ -130,6 +132,7 @@ static esp_err_t save_to_nvs(void)
     nvs_set_u8(nvs, "auth_init", s_config.auth_initialized ? 1 : 0);
     nvs_set_str(nvs, "dev_name", s_config.device_name);
     nvs_set_str(nvs, "ntp_srv", s_config.ntp_server);
+    nvs_set_str(nvs, "timezone", s_config.timezone);
 
     esp_err_t err = nvs_commit(nvs);
     nvs_close(nvs);
@@ -182,6 +185,14 @@ esp_err_t config_set_ntp_server(const char *server)
     strncpy(s_config.ntp_server, server, sizeof(s_config.ntp_server) - 1);
     s_config.ntp_server[sizeof(s_config.ntp_server) - 1] = '\0';
     ESP_LOGI(TAG, "NTP server updated: '%s'", strlen(s_config.ntp_server) ? s_config.ntp_server : "(DHCP)");
+    return save_to_nvs();
+}
+
+esp_err_t config_set_timezone(const char *tz)
+{
+    strncpy(s_config.timezone, tz, sizeof(s_config.timezone) - 1);
+    s_config.timezone[sizeof(s_config.timezone) - 1] = '\0';
+    ESP_LOGI(TAG, "Timezone updated: '%s'", s_config.timezone);
     return save_to_nvs();
 }
 
