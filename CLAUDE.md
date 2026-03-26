@@ -4,7 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-ESP32 Web Terminal — web-based serial terminal for SBCs (Raspberry Pi, etc.) via ESP32-C6-DevKitC-1 over WiFi.
+ESP32 Web Terminal — web-based serial terminal for SBCs (Raspberry Pi, etc.) via ESP32 over WiFi.
+Supported boards: ESP32-C6-DevKitC-1 (8MB), ESP32-C3 Super Mini (4MB).
 
 ## Build
 
@@ -14,18 +15,18 @@ Requires ESP-IDF v5.5+. Before first build, generate TLS certs:
 cd certs && ./generate_cert.sh && cd ..
 ```
 
-Build and flash:
+Build and flash (choose target):
 
 ```bash
-idf.py set-target esp32c6
+idf.py set-target esp32c6   # or esp32c3
 idf.py build
 idf.py -p /dev/ttyUSB0 flash monitor
 ```
 
-If sdkconfig.defaults changes, do a full clean rebuild:
+If sdkconfig.defaults changes or switching targets, do a full clean rebuild:
 
 ```bash
-rm sdkconfig && idf.py fullclean && idf.py set-target esp32c6 && idf.py build
+rm sdkconfig && idf.py fullclean && idf.py set-target esp32c6 && idf.py build  # or esp32c3
 ```
 
 ## Architecture
@@ -36,9 +37,12 @@ main/
   config.c/h        - NVS persistent config (WiFi, baud, auth, device name, NTP, GPIO defaults)
   wifi_manager.c/h  - AP+STA WiFi with auto-fallback, mDNS, DHCP hostname, reconnect watchdog
   auth.c/h          - Session-based auth, salted SHA-256, rate limiting
-  uart_bridge.c/h   - UART1 (GPIO10/11) ↔ WebSocket bridge, configurable baud
+  uart_bridge.c/h   - UART1 ↔ WebSocket bridge, configurable baud (pins vary by target)
   web_server.c/h    - HTTPS server, REST API, WebSocket, OTA, sysinfo, embedded static files
-  gpio_control.c/h  - SBC reset (GPIO22) and power control (GPIO23)
+  gpio_control.c/h  - SBC reset and power control (pins vary by target)
+hardware/
+  DESIGN.md         - C6 HAT PCB design
+  WIRING-C3-MINI.md - C3 Super Mini wiring guide
 frontend/
   index.html        - Single-page terminal UI (all CSS, app JS, FitAddon inlined)
   terminal.js       - WebSocket client, login, toolbar controls (reference copy)
@@ -61,12 +65,14 @@ certs/
 
 ## Pin Assignments
 
-| Function | GPIO | Notes |
-|----------|------|-------|
-| UART1 TX | GPIO10 | To SBC RX |
-| UART1 RX | GPIO11 | From SBC TX |
-| SBC Reset | GPIO22 | Active-low, normally high-Z |
-| SBC Power | GPIO23 | Drives relay/MOSFET |
+Pins are target-conditional (`#if CONFIG_IDF_TARGET_ESP32C3` in headers).
+
+| Function | ESP32-C6 | ESP32-C3 | Notes |
+|----------|----------|----------|-------|
+| UART1 TX | GPIO10   | GPIO0    | To SBC RX |
+| UART1 RX | GPIO11   | GPIO1    | From SBC TX |
+| SBC Reset | GPIO22  | GPIO6    | Active-low, normally high-Z |
+| SBC Power | GPIO23  | GPIO7    | Drives relay/MOSFET |
 
 ## WiFi Behavior
 

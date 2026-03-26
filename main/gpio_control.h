@@ -1,11 +1,19 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Dennis Gilmore
+
 #pragma once
 
 #include "esp_err.h"
 #include <stdbool.h>
 #include <stdint.h>
 
+#if CONFIG_IDF_TARGET_ESP32C3
+#define GPIO_SBC_RESET   6
+#define GPIO_SBC_POWER   7
+#else // ESP32-C6
 #define GPIO_SBC_RESET   22
 #define GPIO_SBC_POWER   23
+#endif
 
 typedef struct {
     bool power_on;

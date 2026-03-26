@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Dennis Gilmore
+
 #pragma once
 
 #include "esp_err.h"
@@ -21,3 +24,13 @@ esp_err_t wifi_manager_connect_sta(const char *ssid, const char *password);
 esp_err_t wifi_manager_disconnect_sta(void);
 void wifi_manager_update_hostname(const char *device_name);
 wifi_manager_status_t wifi_manager_get_status(void);
+
+typedef struct {
+    char ssid[33];
+    int8_t rssi;
+    uint8_t authmode;  // 0=open, else secured
+} wifi_scan_result_t;
+
+// Scan for nearby APs. Caller must free(*results) when done.
+// Returns number of APs found, or -1 on error.
+int wifi_manager_scan(wifi_scan_result_t **results);

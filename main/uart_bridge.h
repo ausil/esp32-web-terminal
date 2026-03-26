@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Dennis Gilmore
+
 #pragma once
 
 #include "esp_err.h"
@@ -5,8 +8,14 @@
 #include <stddef.h>
 
 #define UART_BRIDGE_PORT        1          // UART1
+
+#if CONFIG_IDF_TARGET_ESP32C3
+#define UART_BRIDGE_TX_PIN      0
+#define UART_BRIDGE_RX_PIN      1
+#else // ESP32-C6
 #define UART_BRIDGE_TX_PIN      10
 #define UART_BRIDGE_RX_PIN      11
+#endif
 #define UART_BRIDGE_BUF_SIZE    (1024)     // UART driver RX buffer
 #define UART_BRIDGE_RX_RING_SIZE (8192)    // Ring buffer for WebSocket TX
 

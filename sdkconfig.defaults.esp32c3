@@ -1,0 +1,4 @@
+# ESP32-C3 Super Mini overrides (applied on top of sdkconfig.defaults)
+CONFIG_IDF_TARGET="esp32c3"
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+# CONFIG_ESPTOOLPY_FLASHSIZE_8MB is not set

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Dennis Gilmore
+
 #include "web_server.h"
 #include "auth.h"
 #include "config.h"
@@ -261,6 +264,32 @@ static esp_err_t handle_sysinfo(httpd_req_t *req)
     }
     cJSON_AddStringToObject(root, "uptime", uptime_str);
     cJSON_AddNumberToObject(root, "uptime_seconds", uptime_s);
+
+    char *json_str = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    httpd_resp_set_type(req, "application/json");
+    set_cors_headers(req);
+    esp_err_t ret = httpd_resp_send(req, json_str, strlen(json_str));
+    free(json_str);
+    return ret;
+}
+
+static esp_err_t handle_wifi_scan(httpd_req_t *req)
+{
+    if (!require_auth(req)) return ESP_OK;
+
+    wifi_scan_result_t *results = NULL;
+    int count = wifi_manager_scan(&results);
+
+    cJSON *root = cJSON_CreateArray();
+    for (int i = 0; i < count; i++) {
+        cJSON *ap = cJSON_CreateObject();
+        cJSON_AddStringToObject(ap, "ssid", results[i].ssid);
+        cJSON_AddNumberToObject(ap, "rssi", results[i].rssi);
+        cJSON_AddBoolToObject(ap, "secure", results[i].authmode != 0);
+        cJSON_AddItemToArray(root, ap);
+    }
+    free(results);
 
     char *json_str = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -574,7 +603,7 @@ esp_err_t web_server_start(void)
 {
     httpd_ssl_config_t config = HTTPD_SSL_CONFIG_DEFAULT();
     config.httpd.max_open_sockets = 4;
-    config.httpd.max_uri_handlers = 14;
+    config.httpd.max_uri_handlers = 16;
     config.httpd.stack_size = 10240;
     config.httpd.lru_purge_enable = true;
     config.httpd.close_fn = on_close;
@@ -604,6 +633,7 @@ esp_err_t web_server_start(void)
     const httpd_uri_t route_power = { .uri = "/api/power", .method = HTTP_POST, .handler = handle_power };
     const httpd_uri_t route_ota = { .uri = "/api/ota", .method = HTTP_POST, .handler = handle_ota };
     const httpd_uri_t route_sysinfo = { .uri = "/api/sysinfo", .method = HTTP_GET, .handler = handle_sysinfo };
+    const httpd_uri_t route_wifi_scan = { .uri = "/api/wifi/scan", .method = HTTP_GET, .handler = handle_wifi_scan };
 
     /* WebSocket */
     const httpd_uri_t route_ws = { .uri = "/ws", .method = HTTP_GET, .handler = handle_ws, .is_websocket = true };
@@ -618,6 +648,7 @@ esp_err_t web_server_start(void)
     httpd_register_uri_handler(s_server, &route_power);
     httpd_register_uri_handler(s_server, &route_ota);
     httpd_register_uri_handler(s_server, &route_sysinfo);
+    httpd_register_uri_handler(s_server, &route_wifi_scan);
     httpd_register_uri_handler(s_server, &route_ws);
 
     httpd_register_err_handler(s_server, HTTPD_404_NOT_FOUND, handle_404);

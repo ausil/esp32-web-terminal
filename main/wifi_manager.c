@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Dennis Gilmore
+
 #include "wifi_manager.h"
 #include "config.h"
 #include "esp_wifi.h"
@@ -327,4 +330,101 @@ esp_err_t wifi_manager_disconnect_sta(void)
 wifi_manager_status_t wifi_manager_get_status(void)
 {
     return s_status;
+}
+
+int wifi_manager_scan(wifi_scan_result_t **results)
+{
+    *results = NULL;
+
+    // Need STA or APSTA mode to scan
+    wifi_mode_t mode;
+    esp_wifi_get_mode(&mode);
+    if (mode == WIFI_MODE_AP) {
+        // Temporarily switch to APSTA for scanning
+        esp_wifi_set_mode(WIFI_MODE_APSTA);
+    }
+
+    wifi_scan_config_t scan_config = {
+        .show_hidden = false,
+        .scan_type = WIFI_SCAN_TYPE_ACTIVE,
+        .scan_time.active = { .min = 100, .max = 300 },
+    };
+
+    esp_err_t err = esp_wifi_scan_start(&scan_config, true);  // blocking
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "WiFi scan failed: %s", esp_err_to_name(err));
+        // Restore mode if we changed it
+        if (mode == WIFI_MODE_AP) {
+            esp_wifi_set_mode(WIFI_MODE_AP);
+        }
+        return -1;
+    }
+
+    uint16_t ap_count = 0;
+    esp_wifi_scan_get_ap_num(&ap_count);
+    if (ap_count == 0) {
+        esp_wifi_scan_get_ap_records(&ap_count, NULL);  // clear scan results
+        if (mode == WIFI_MODE_AP) {
+            esp_wifi_set_mode(WIFI_MODE_AP);
+        }
+        return 0;
+    }
+
+    // Cap at 20 results
+    if (ap_count > 20) ap_count = 20;
+
+    wifi_ap_record_t *ap_records = malloc(sizeof(wifi_ap_record_t) * ap_count);
+    if (!ap_records) {
+        esp_wifi_scan_get_ap_records(&ap_count, NULL);
+        if (mode == WIFI_MODE_AP) {
+            esp_wifi_set_mode(WIFI_MODE_AP);
+        }
+        return -1;
+    }
+
+    esp_wifi_scan_get_ap_records(&ap_count, ap_records);
+
+    // Deduplicate by SSID, keeping strongest signal
+    wifi_scan_result_t *res = malloc(sizeof(wifi_scan_result_t) * ap_count);
+    if (!res) {
+        free(ap_records);
+        if (mode == WIFI_MODE_AP) {
+            esp_wifi_set_mode(WIFI_MODE_AP);
+        }
+        return -1;
+    }
+
+    int count = 0;
+    for (int i = 0; i < ap_count; i++) {
+        if (ap_records[i].ssid[0] == '\0') continue;  // skip hidden
+
+        // Check for duplicate SSID
+        bool dup = false;
+        for (int j = 0; j < count; j++) {
+            if (strcmp(res[j].ssid, (char *)ap_records[i].ssid) == 0) {
+                if (ap_records[i].rssi > res[j].rssi) {
+                    res[j].rssi = ap_records[i].rssi;
+                }
+                dup = true;
+                break;
+            }
+        }
+        if (!dup) {
+            strncpy(res[count].ssid, (char *)ap_records[i].ssid, sizeof(res[count].ssid) - 1);
+            res[count].ssid[sizeof(res[count].ssid) - 1] = '\0';
+            res[count].rssi = ap_records[i].rssi;
+            res[count].authmode = (ap_records[i].authmode != WIFI_AUTH_OPEN) ? 1 : 0;
+            count++;
+        }
+    }
+
+    free(ap_records);
+
+    if (mode == WIFI_MODE_AP) {
+        esp_wifi_set_mode(WIFI_MODE_AP);
+    }
+
+    *results = res;
+    ESP_LOGI(TAG, "WiFi scan found %d unique APs", count);
+    return count;
 }

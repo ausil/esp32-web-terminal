@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: MIT -->
+<!-- Copyright (c) 2026 Dennis Gilmore -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -153,7 +155,10 @@ body {
             <fieldset id="wifi-fieldset">
                 <legend>WiFi Client (STA)</legend>
                 <div id="wifi-status"></div>
-                <input type="text" id="sta-ssid" placeholder="WiFi SSID" autocomplete="off">
+                <div style="display:flex;gap:6px;align-items:center">
+                    <select id="sta-ssid" style="flex:1;min-width:0"><option value="">-- Select WiFi --</option></select>
+                    <button id="btn-wifi-scan" style="white-space:nowrap;padding:6px 10px" title="Scan for networks">Scan</button>
+                </div>
                 <input type="password" id="sta-pass" placeholder="WiFi Password" autocomplete="off">
                 <button id="btn-wifi-save">Connect</button>
                 <button id="btn-wifi-disconnect" class="danger" style="display:none;margin-top:8px">Disconnect WiFi</button>
@@ -469,7 +474,21 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
         });
         api("GET", "/api/config", null, function(err, conf) {
             if (err || !conf) return;
-            document.getElementById("sta-ssid").value = conf.sta_ssid || "";
+            var ssidSelect = document.getElementById("sta-ssid");
+            if (conf.sta_ssid) {
+                // Add current SSID as an option if not already present
+                var found = false;
+                for (var i = 0; i < ssidSelect.options.length; i++) {
+                    if (ssidSelect.options[i].value === conf.sta_ssid) { found = true; break; }
+                }
+                if (!found) {
+                    var opt = document.createElement("option");
+                    opt.value = conf.sta_ssid;
+                    opt.textContent = conf.sta_ssid;
+                    ssidSelect.appendChild(opt);
+                }
+                ssidSelect.value = conf.sta_ssid;
+            }
             document.getElementById("sta-pass").value = "";
             document.getElementById("power-default").checked = conf.power_on_default;
             document.getElementById("device-name").value = conf.device_name || "";
@@ -486,16 +505,17 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
             document.getElementById("device-title").textContent = conf.device_name || "ESP32 Terminal";
             var wifiFieldset = document.getElementById("wifi-fieldset");
             var btnDisconnect = document.getElementById("btn-wifi-disconnect");
+            var ssidRow = document.getElementById("sta-ssid").parentElement;
             if (conf.sta_connected) {
                 wifiStatus.textContent = "Connected: " + conf.sta_ssid + " (" + conf.sta_ip + ")";
                 wifiStatus.style.color = "var(--success)";
-                document.getElementById("sta-ssid").style.display = "none";
+                ssidRow.style.display = "none";
                 document.getElementById("sta-pass").style.display = "none";
                 document.getElementById("btn-wifi-save").style.display = "none";
                 btnDisconnect.style.display = "";
                 wifiFieldset.style.display = "";
             } else {
-                document.getElementById("sta-ssid").style.display = "";
+                ssidRow.style.display = "";
                 document.getElementById("sta-pass").style.display = "";
                 document.getElementById("btn-wifi-save").style.display = "";
                 btnDisconnect.style.display = "none";
@@ -545,10 +565,33 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
         });
     });
 
+    document.getElementById("btn-wifi-scan").addEventListener("click", function() {
+        var btn = this;
+        btn.disabled = true;
+        btn.textContent = "Scanning...";
+        api("GET", "/api/wifi/scan", null, function(err, aps) {
+            btn.disabled = false;
+            btn.textContent = "Scan";
+            if (err || !aps) { showSettingsMsg("Scan failed", true); return; }
+            var sel = document.getElementById("sta-ssid");
+            var cur = sel.value;
+            sel.innerHTML = '<option value="">-- Select WiFi --</option>';
+            aps.forEach(function(ap) {
+                var opt = document.createElement("option");
+                opt.value = ap.ssid;
+                var bars = ap.rssi > -50 ? "▂▄▆█" : ap.rssi > -65 ? "▂▄▆" : ap.rssi > -75 ? "▂▄" : "▂";
+                opt.textContent = ap.ssid + "  " + bars + (ap.secure ? " 🔒" : "");
+                sel.appendChild(opt);
+            });
+            if (cur) sel.value = cur;
+            showSettingsMsg("Found " + aps.length + " network" + (aps.length !== 1 ? "s" : ""));
+        });
+    });
+
     document.getElementById("btn-wifi-save").addEventListener("click", function() {
-        var ssid = document.getElementById("sta-ssid").value.trim();
+        var ssid = document.getElementById("sta-ssid").value;
         var pass = document.getElementById("sta-pass").value;
-        if (!ssid) { showSettingsMsg("SSID required", true); return; }
+        if (!ssid) { showSettingsMsg("Select a network first", true); return; }
         api("POST", "/api/config", {sta_ssid: ssid, sta_pass: pass}, function(err, res) {
             showSettingsMsg(!err && res && res.ok ? "Connecting to " + ssid + "..." : ((res && res.error) || "Failed"), !(!err && res && res.ok));
         });
