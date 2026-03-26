@@ -7,6 +7,7 @@ idf_component_register(
         "uart_bridge.c"
         "web_server.c"
         "gpio_control.c"
+        "ota_github.c"
     INCLUDE_DIRS "."
     EMBED_TXTFILES
         "${CMAKE_SOURCE_DIR}/frontend/index.html"

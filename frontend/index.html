@@ -206,6 +206,14 @@ body {
             </fieldset>
             <fieldset>
                 <legend>Firmware Update</legend>
+                <div style="margin-bottom:12px">
+                    <button id="btn-check-update">Check for Updates</button>
+                    <div id="update-info" style="font-size:13px;margin-top:8px;min-height:16px"></div>
+                    <button id="btn-github-update" class="danger" style="display:none;margin-top:8px">Install Update</button>
+                    <div id="github-ota-status" style="font-size:13px;margin-top:8px;min-height:16px"></div>
+                </div>
+                <hr style="border-color:var(--border);margin:12px 0">
+                <div style="font-size:12px;color:var(--dim);margin-bottom:8px">Manual upload:</div>
                 <input type="file" id="ota-file" accept=".bin" style="margin-bottom:8px;font-size:13px">
                 <button id="btn-ota-upload">Upload Firmware</button>
                 <div id="ota-status" style="font-size:13px;margin-top:8px;min-height:16px"></div>
@@ -645,6 +653,80 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
     });
 
     // --- OTA ---
+
+    document.getElementById("btn-check-update").addEventListener("click", function() {
+        var btn = this;
+        var info = document.getElementById("update-info");
+        var installBtn = document.getElementById("btn-github-update");
+        btn.disabled = true;
+        btn.textContent = "Checking...";
+        info.textContent = "";
+        info.style.color = "var(--dim)";
+        installBtn.style.display = "none";
+        var xhr = new XMLHttpRequest();
+        xhr.open("GET", "/api/ota/check", true);
+        if (sessionToken) xhr.setRequestHeader("Authorization", "Bearer " + sessionToken);
+        xhr.timeout = 15000;
+        xhr.onload = function() {
+            btn.disabled = false;
+            btn.textContent = "Check for Updates";
+            try {
+                var res = JSON.parse(xhr.responseText);
+                if (res.update_available) {
+                    info.textContent = "Update available: v" + res.latest_version + " (current: v" + res.current_version + ")";
+                    info.style.color = "var(--accent)";
+                    installBtn.style.display = "";
+                    installBtn.textContent = "Install v" + res.latest_version;
+                } else {
+                    info.textContent = "Up to date (v" + res.current_version + ")";
+                    info.style.color = "var(--success)";
+                }
+            } catch(e) { info.textContent = "Check failed"; info.style.color = "var(--danger)"; }
+        };
+        xhr.onerror = function() { btn.disabled = false; btn.textContent = "Check for Updates"; info.textContent = "Network error"; info.style.color = "var(--danger)"; };
+        xhr.ontimeout = function() { btn.disabled = false; btn.textContent = "Check for Updates"; info.textContent = "Timed out"; info.style.color = "var(--danger)"; };
+        xhr.send();
+    });
+
+    document.getElementById("btn-github-update").addEventListener("click", function() {
+        if (!confirm("Install update? The device will reboot.")) return;
+        var btn = this;
+        var status = document.getElementById("github-ota-status");
+        btn.disabled = true;
+        btn.textContent = "Updating...";
+        status.textContent = "Downloading and installing firmware...";
+        status.style.color = "var(--dim)";
+        var xhr = new XMLHttpRequest();
+        xhr.open("POST", "/api/ota/github", true);
+        if (sessionToken) xhr.setRequestHeader("Authorization", "Bearer " + sessionToken);
+        xhr.timeout = 120000;
+        xhr.onload = function() {
+            try {
+                var res = JSON.parse(xhr.responseText);
+                if (res.ok) {
+                    status.textContent = "Update complete! Rebooting...";
+                    status.style.color = "var(--success)";
+                    setTimeout(function() { window.location.reload(); }, 10000);
+                } else {
+                    status.textContent = res.error || "Update failed";
+                    status.style.color = "var(--danger)";
+                    btn.disabled = false;
+                    btn.textContent = "Install Update";
+                }
+            } catch(e) { status.textContent = "Update failed"; status.style.color = "var(--danger)"; btn.disabled = false; btn.textContent = "Install Update"; }
+        };
+        xhr.onerror = function() {
+            status.textContent = "Connection lost - device may be rebooting...";
+            status.style.color = "var(--accent)";
+            setTimeout(function() { window.location.reload(); }, 10000);
+        };
+        xhr.ontimeout = function() {
+            status.textContent = "Timed out - device may be rebooting...";
+            status.style.color = "var(--accent)";
+            setTimeout(function() { window.location.reload(); }, 10000);
+        };
+        xhr.send();
+    });
 
     document.getElementById("btn-ota-upload").addEventListener("click", function() {
         var fileInput = document.getElementById("ota-file");

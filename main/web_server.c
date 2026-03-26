@@ -7,6 +7,7 @@
 #include "uart_bridge.h"
 #include "gpio_control.h"
 #include "wifi_manager.h"
+#include "ota_github.h"
 #include "esp_https_server.h"
 #include "esp_ota_ops.h"
 #include "esp_chip_info.h"
@@ -527,6 +528,59 @@ static esp_err_t handle_ota(httpd_req_t *req)
     return ESP_OK;
 }
 
+// --- GitHub OTA handlers ---
+
+static esp_err_t handle_ota_check(httpd_req_t *req)
+{
+    if (!require_auth(req)) return ESP_OK;
+
+    ota_github_check_result_t result;
+    esp_err_t err = ota_github_check(&result);
+    if (err != ESP_OK) {
+        return send_json_error(req, 500, "Failed to check for updates");
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "update_available", result.update_available);
+    cJSON_AddStringToObject(root, "current_version", esp_app_get_description()->version);
+    cJSON_AddStringToObject(root, "latest_version", result.latest_version);
+
+    char *json_str = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    httpd_resp_set_type(req, "application/json");
+    set_cors_headers(req);
+    esp_err_t ret = httpd_resp_send(req, json_str, strlen(json_str));
+    free(json_str);
+    return ret;
+}
+
+static esp_err_t handle_ota_github(httpd_req_t *req)
+{
+    if (!require_auth(req)) return ESP_OK;
+
+    ota_github_check_result_t result;
+    esp_err_t err = ota_github_check(&result);
+    if (err != ESP_OK) {
+        return send_json_error(req, 500, "Failed to check for updates");
+    }
+    if (!result.update_available) {
+        return send_json_error(req, 400, "No update available");
+    }
+
+    err = ota_github_apply(result.asset_url);
+    if (err != ESP_OK) {
+        return send_json_error(req, 500, "OTA update failed");
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, "{\"ok\":true,\"message\":\"Update complete, rebooting...\"}", HTTPD_RESP_USE_STRLEN);
+
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_restart();
+
+    return ESP_OK;
+}
+
 // --- WebSocket handler ---
 
 static esp_err_t handle_ws(httpd_req_t *req)
@@ -641,6 +695,8 @@ esp_err_t web_server_start(void)
     const httpd_uri_t route_ota = { .uri = "/api/ota", .method = HTTP_POST, .handler = handle_ota };
     const httpd_uri_t route_sysinfo = { .uri = "/api/sysinfo", .method = HTTP_GET, .handler = handle_sysinfo };
     const httpd_uri_t route_wifi_scan = { .uri = "/api/wifi/scan", .method = HTTP_GET, .handler = handle_wifi_scan };
+    const httpd_uri_t route_ota_check = { .uri = "/api/ota/check", .method = HTTP_GET, .handler = handle_ota_check };
+    const httpd_uri_t route_ota_github = { .uri = "/api/ota/github", .method = HTTP_POST, .handler = handle_ota_github };
 
     /* WebSocket */
     const httpd_uri_t route_ws = { .uri = "/ws", .method = HTTP_GET, .handler = handle_ws, .is_websocket = true };
@@ -656,6 +712,8 @@ esp_err_t web_server_start(void)
     httpd_register_uri_handler(s_server, &route_ota);
     httpd_register_uri_handler(s_server, &route_sysinfo);
     httpd_register_uri_handler(s_server, &route_wifi_scan);
+    httpd_register_uri_handler(s_server, &route_ota_check);
+    httpd_register_uri_handler(s_server, &route_ota_github);
     httpd_register_uri_handler(s_server, &route_ws);
 
     httpd_register_err_handler(s_server, HTTPD_404_NOT_FOUND, handle_404);
