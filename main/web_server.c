@@ -281,6 +281,13 @@ static esp_err_t handle_wifi_scan(httpd_req_t *req)
     wifi_scan_result_t *results = NULL;
     int count = wifi_manager_scan(&results);
 
+    if (count < 0) {
+        httpd_resp_set_type(req, "application/json");
+        set_cors_headers(req);
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        return httpd_resp_send(req, "{\"error\":\"Scan failed\"}", HTTPD_RESP_USE_STRLEN);
+    }
+
     cJSON *root = cJSON_CreateArray();
     for (int i = 0; i < count; i++) {
         cJSON *ap = cJSON_CreateObject();

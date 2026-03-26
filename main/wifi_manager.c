@@ -27,6 +27,7 @@ static wifi_manager_status_t s_status;
 static esp_netif_t *s_sta_netif = NULL;
 static esp_netif_t *s_ap_netif = NULL;
 static TimerHandle_t s_reconnect_timer = NULL;
+static bool s_scanning = false;  // suppress disconnect handling during scan
 
 #define RECONNECT_INTERVAL_MS  30000  // Retry STA every 30s when on AP fallback
 
@@ -38,8 +39,14 @@ static void event_handler(void *arg, esp_event_base_t event_base,
                           int32_t event_id, void *event_data)
 {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
+        if (!s_scanning) {
+            esp_wifi_connect();
+        }
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        if (s_scanning) {
+            ESP_LOGI(TAG, "STA disconnect during scan, ignoring");
+            return;
+        }
         s_status.sta_connected = false;
         memset(s_status.sta_ip, 0, sizeof(s_status.sta_ip));
         if (s_retry_count < MAX_STA_RETRIES) {
@@ -336,26 +343,44 @@ int wifi_manager_scan(wifi_scan_result_t **results)
 {
     *results = NULL;
 
-    // Need STA or APSTA mode to scan
-    wifi_mode_t mode;
-    esp_wifi_get_mode(&mode);
-    if (mode == WIFI_MODE_AP) {
-        // Temporarily switch to APSTA for scanning
+    // Suppress auto-connect and disconnect events during scan
+    s_scanning = true;
+
+    // Scanning requires STA interface; switch to APSTA if needed
+    wifi_mode_t orig_mode;
+    esp_wifi_get_mode(&orig_mode);
+    bool switched = false;
+    if (orig_mode == WIFI_MODE_AP) {
         esp_wifi_set_mode(WIFI_MODE_APSTA);
+        switched = true;
+        vTaskDelay(pdMS_TO_TICKS(100));  // let STA interface initialize
+    }
+
+    // Disconnect STA if connecting/connected — ESP-IDF won't scan while STA is busy
+    if (orig_mode == WIFI_MODE_STA || orig_mode == WIFI_MODE_APSTA) {
+        esp_wifi_disconnect();
+        vTaskDelay(pdMS_TO_TICKS(100));  // let disconnect settle
     }
 
     wifi_scan_config_t scan_config = {
         .show_hidden = false,
         .scan_type = WIFI_SCAN_TYPE_ACTIVE,
-        .scan_time.active = { .min = 100, .max = 300 },
+        .scan_time.active = { .min = 120, .max = 500 },
     };
 
     esp_err_t err = esp_wifi_scan_start(&scan_config, true);  // blocking
+
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "WiFi scan failed: %s", esp_err_to_name(err));
-        // Restore mode if we changed it
-        if (mode == WIFI_MODE_AP) {
-            esp_wifi_set_mode(WIFI_MODE_AP);
+        if (switched) {
+            esp_wifi_set_mode(orig_mode);
+        }
+        // Reconnect STA if we disconnected it
+        if (strlen(config_get()->sta_ssid) > 0) {
+            s_scanning = false;
+            esp_wifi_connect();
+        } else {
+            s_scanning = false;
         }
         return -1;
     }
@@ -364,8 +389,12 @@ int wifi_manager_scan(wifi_scan_result_t **results)
     esp_wifi_scan_get_ap_num(&ap_count);
     if (ap_count == 0) {
         esp_wifi_scan_get_ap_records(&ap_count, NULL);  // clear scan results
-        if (mode == WIFI_MODE_AP) {
-            esp_wifi_set_mode(WIFI_MODE_AP);
+        if (switched) esp_wifi_set_mode(orig_mode);
+        if (strlen(config_get()->sta_ssid) > 0) {
+            s_scanning = false;
+            esp_wifi_connect();
+        } else {
+            s_scanning = false;
         }
         return 0;
     }
@@ -376,9 +405,7 @@ int wifi_manager_scan(wifi_scan_result_t **results)
     wifi_ap_record_t *ap_records = malloc(sizeof(wifi_ap_record_t) * ap_count);
     if (!ap_records) {
         esp_wifi_scan_get_ap_records(&ap_count, NULL);
-        if (mode == WIFI_MODE_AP) {
-            esp_wifi_set_mode(WIFI_MODE_AP);
-        }
+        if (switched) esp_wifi_set_mode(orig_mode);
         return -1;
     }
 
@@ -388,9 +415,7 @@ int wifi_manager_scan(wifi_scan_result_t **results)
     wifi_scan_result_t *res = malloc(sizeof(wifi_scan_result_t) * ap_count);
     if (!res) {
         free(ap_records);
-        if (mode == WIFI_MODE_AP) {
-            esp_wifi_set_mode(WIFI_MODE_AP);
-        }
+        if (switched) esp_wifi_set_mode(orig_mode);
         return -1;
     }
 
@@ -420,8 +445,18 @@ int wifi_manager_scan(wifi_scan_result_t **results)
 
     free(ap_records);
 
-    if (mode == WIFI_MODE_AP) {
-        esp_wifi_set_mode(WIFI_MODE_AP);
+    // Restore original WiFi mode
+    if (switched) {
+        esp_wifi_set_mode(orig_mode);
+    }
+
+    // Reconnect STA if we disconnected it for scanning
+    if (strlen(config_get()->sta_ssid) > 0) {
+        ESP_LOGI(TAG, "Reconnecting STA after scan");
+        s_scanning = false;
+        esp_wifi_connect();
+    } else {
+        s_scanning = false;
     }
 
     *results = res;

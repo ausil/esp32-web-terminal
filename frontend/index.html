@@ -569,23 +569,33 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
         var btn = this;
         btn.disabled = true;
         btn.textContent = "Scanning...";
-        api("GET", "/api/wifi/scan", null, function(err, aps) {
+        var xhr = new XMLHttpRequest();
+        xhr.open("GET", "/api/wifi/scan", true);
+        if (sessionToken) xhr.setRequestHeader("Authorization", "Bearer " + sessionToken);
+        xhr.timeout = 15000;
+        xhr.onload = function() {
             btn.disabled = false;
             btn.textContent = "Scan";
-            if (err || !aps) { showSettingsMsg("Scan failed", true); return; }
-            var sel = document.getElementById("sta-ssid");
-            var cur = sel.value;
-            sel.innerHTML = '<option value="">-- Select WiFi --</option>';
-            aps.forEach(function(ap) {
-                var opt = document.createElement("option");
-                opt.value = ap.ssid;
-                var bars = ap.rssi > -50 ? "▂▄▆█" : ap.rssi > -65 ? "▂▄▆" : ap.rssi > -75 ? "▂▄" : "▂";
-                opt.textContent = ap.ssid + "  " + bars + (ap.secure ? " 🔒" : "");
-                sel.appendChild(opt);
-            });
-            if (cur) sel.value = cur;
-            showSettingsMsg("Found " + aps.length + " network" + (aps.length !== 1 ? "s" : ""));
-        });
+            try {
+                var aps = JSON.parse(xhr.responseText);
+                if (!Array.isArray(aps)) { showSettingsMsg("Scan failed", true); return; }
+                var sel = document.getElementById("sta-ssid");
+                var cur = sel.value;
+                sel.innerHTML = '<option value="">-- Select WiFi --</option>';
+                aps.forEach(function(ap) {
+                    var opt = document.createElement("option");
+                    opt.value = ap.ssid;
+                    var bars = ap.rssi > -50 ? "\u2582\u2584\u2586\u2588" : ap.rssi > -65 ? "\u2582\u2584\u2586" : ap.rssi > -75 ? "\u2582\u2584" : "\u2582";
+                    opt.textContent = ap.ssid + "  " + bars + (ap.secure ? " \uD83D\uDD12" : "");
+                    sel.appendChild(opt);
+                });
+                if (cur) sel.value = cur;
+                showSettingsMsg("Found " + aps.length + " network" + (aps.length !== 1 ? "s" : ""));
+            } catch(e) { showSettingsMsg("Scan failed", true); }
+        };
+        xhr.onerror = function() { btn.disabled = false; btn.textContent = "Scan"; showSettingsMsg("Scan failed (network error)", true); };
+        xhr.ontimeout = function() { btn.disabled = false; btn.textContent = "Scan"; showSettingsMsg("Scan timed out", true); };
+        xhr.send();
     });
 
     document.getElementById("btn-wifi-save").addEventListener("click", function() {
