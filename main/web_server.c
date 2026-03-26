@@ -15,6 +15,8 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "cJSON.h"
+#include "nvs_flash.h"
+#include "nvs.h"
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -39,6 +41,57 @@ extern const uint8_t server_crt_start[] asm("_binary_server_crt_start");
 extern const uint8_t server_crt_end[]   asm("_binary_server_crt_end");
 extern const uint8_t server_key_start[] asm("_binary_server_key_start");
 extern const uint8_t server_key_end[]   asm("_binary_server_key_end");
+
+// --- Persistent TLS certs (survive OTA updates via NVS) ---
+#define NVS_CERTS_NAMESPACE "tls_certs"
+#define MAX_CERT_SIZE 2048
+
+static char *s_cert_pem = NULL;
+static char *s_key_pem = NULL;
+
+// Load certs from NVS, or save embedded certs to NVS on first boot
+static void load_or_save_certs(void)
+{
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open(NVS_CERTS_NAMESPACE, NVS_READWRITE, &nvs);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to open NVS for certs: %s", esp_err_to_name(err));
+        return;
+    }
+
+    size_t cert_len = 0, key_len = 0;
+    err = nvs_get_blob(nvs, "cert", NULL, &cert_len);
+
+    if (err == ESP_OK && cert_len > 0) {
+        // Certs exist in NVS — load them
+        s_cert_pem = malloc(cert_len);
+        s_key_pem = malloc(MAX_CERT_SIZE);
+        if (s_cert_pem && s_key_pem) {
+            nvs_get_blob(nvs, "cert", s_cert_pem, &cert_len);
+            key_len = MAX_CERT_SIZE;
+            nvs_get_blob(nvs, "key", s_key_pem, &key_len);
+            ESP_LOGI(TAG, "TLS certs loaded from NVS (cert=%d key=%d bytes)", cert_len, key_len);
+        }
+    } else {
+        // First boot or NVS cleared — save embedded certs
+        cert_len = strlen((const char *)server_crt_start) + 1;
+        key_len = strlen((const char *)server_key_start) + 1;
+        nvs_set_blob(nvs, "cert", server_crt_start, cert_len);
+        nvs_set_blob(nvs, "key", server_key_start, key_len);
+        nvs_commit(nvs);
+        ESP_LOGI(TAG, "TLS certs saved to NVS from firmware (cert=%d key=%d bytes)", cert_len, key_len);
+
+        // Use embedded certs directly this boot
+        s_cert_pem = malloc(cert_len);
+        s_key_pem = malloc(key_len);
+        if (s_cert_pem && s_key_pem) {
+            memcpy(s_cert_pem, server_crt_start, cert_len);
+            memcpy(s_key_pem, server_key_start, key_len);
+        }
+    }
+
+    nvs_close(nvs);
+}
 
 // --- WebSocket client tracking ---
 #define MAX_WS_CLIENTS 4
@@ -657,6 +710,7 @@ static void on_close(httpd_handle_t hd, int sockfd)
 esp_err_t web_server_init(void)
 {
     memset(s_ws_clients, 0, sizeof(s_ws_clients));
+    load_or_save_certs();
     return ESP_OK;
 }
 
@@ -669,11 +723,13 @@ esp_err_t web_server_start(void)
     config.httpd.lru_purge_enable = true;
     config.httpd.close_fn = on_close;
 
-    /* Embedded PEM cert and key (EMBED_TXTFILES adds null terminator) */
-    config.servercert = server_crt_start;
-    config.servercert_len = strlen((const char *)server_crt_start) + 1;
-    config.prvtkey_pem = server_key_start;
-    config.prvtkey_len = strlen((const char *)server_key_start) + 1;
+    /* Use persistent certs from NVS (survive OTA), fall back to embedded */
+    const uint8_t *cert = s_cert_pem ? (const uint8_t *)s_cert_pem : server_crt_start;
+    const uint8_t *key = s_key_pem ? (const uint8_t *)s_key_pem : server_key_start;
+    config.servercert = cert;
+    config.servercert_len = strlen((const char *)cert) + 1;
+    config.prvtkey_pem = key;
+    config.prvtkey_len = strlen((const char *)key) + 1;
 
     esp_err_t err = httpd_ssl_start(&s_server, &config);
     if (err != ESP_OK) {
