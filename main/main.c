@@ -60,21 +60,23 @@ static void ntp_init(void)
     tzset();
     ESP_LOGI(TAG, "Timezone: %s", conf->timezone);
 
-    esp_sntp_config_t ntp_config = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
-    ntp_config.sync_cb = ntp_sync_cb;
-
     if (strlen(conf->ntp_server) > 0) {
-        ntp_config.servers[0] = conf->ntp_server;
+        // Manual NTP server configured — use it directly
+        esp_sntp_config_t ntp_config = ESP_NETIF_SNTP_DEFAULT_CONFIG(conf->ntp_server);
+        ntp_config.sync_cb = ntp_sync_cb;
         snprintf(s_ntp_server, sizeof(s_ntp_server), "%s (configured)", conf->ntp_server);
         ESP_LOGI(TAG, "NTP server: %s", conf->ntp_server);
+        esp_netif_sntp_init(&ntp_config);
     } else {
+        // DHCP NTP discovery: set pool.ntp.org on index 1, leave index 0 for DHCP
+        esp_sntp_config_t ntp_config = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+        ntp_config.sync_cb = ntp_sync_cb;
         ntp_config.server_from_dhcp = true;
-        ntp_config.renew_servers_after_new_IP = true;
-        snprintf(s_ntp_server, sizeof(s_ntp_server), "pool.ntp.org (awaiting DHCP)");
-        ESP_LOGI(TAG, "NTP: using DHCP (fallback: pool.ntp.org)");
+        ntp_config.renew_servers_after_new_IP = false;
+        snprintf(s_ntp_server, sizeof(s_ntp_server), "awaiting DHCP (fallback: pool.ntp.org)");
+        ESP_LOGI(TAG, "NTP: DHCP discovery enabled (fallback: pool.ntp.org)");
+        esp_netif_sntp_init(&ntp_config);
     }
-
-    esp_netif_sntp_init(&ntp_config);
 }
 
 void app_main(void)
@@ -90,11 +92,12 @@ void app_main(void)
     // 3. Initialize GPIO control (reset + power)
     ESP_ERROR_CHECK(gpio_control_init());
 
-    // 4. Initialize WiFi
-    ESP_ERROR_CHECK(wifi_manager_init());
-
-    // 5. Initialize NTP
+    // 4. Initialize NTP before WiFi so DHCP NTP discovery is ready
+    //    when the DHCP lease arrives
     ntp_init();
+
+    // 5. Initialize WiFi
+    ESP_ERROR_CHECK(wifi_manager_init());
 
     // 6. Initialize UART bridge with configured baud rate
     app_config_t *conf = config_get();
