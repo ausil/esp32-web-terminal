@@ -6,3 +6,4 @@ dependencies.lock
 certs/server.crt
 certs/server.key
 hardware/
+*.bin
