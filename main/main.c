@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Dennis Gilmore
+
 #include "config.h"
 #include "wifi_manager.h"
 #include "auth.h"

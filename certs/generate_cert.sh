@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Dennis Gilmore
+#
 # Generate a self-signed ECC P-256 certificate for the ESP32 HTTPS server.
 # Run this once before building. The generated cert/key are embedded in firmware.
 

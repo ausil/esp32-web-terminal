@@ -5,3 +5,4 @@ managed_components/
 dependencies.lock
 certs/server.crt
 certs/server.key
+hardware/

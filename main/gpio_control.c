@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Dennis Gilmore
+
 #include "gpio_control.h"
 #include "config.h"
 #include "driver/gpio.h"

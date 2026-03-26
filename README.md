@@ -1,50 +1,57 @@
 # ESP32 Web Terminal
 
-A web-based serial terminal for single-board computers (Raspberry Pi, BeagleBone, etc.) using an ESP32-C6 as a WiFi-to-UART bridge. Access your SBC's serial console from any browser over your local network — no USB cable or SSH needed.
+A web-based serial terminal for single-board computers (Raspberry Pi, BeagleBone, etc.) using an ESP32 as a WiFi-to-UART bridge. Access your SBC's serial console from any browser over your local network — no USB cable or SSH needed.
+
+Supported boards: **ESP32-C6-DevKitC-1** (8MB) and **ESP32-C3 Super Mini** (4MB).
 
 ## Features
 
 - **Browser-based terminal** — full terminal emulator using [xterm.js](https://xtermjs.org/), accessible from any device with a browser
 - **WiFi connectivity** — connect via your existing WiFi network (STA mode) or the ESP32's own access point (AP mode)
 - **Smart WiFi management** — AP disabled when STA is connected; auto-fallback to AP if STA drops; reconnect watchdog retries every 30s
-- **HTTPS + WebSocket** — all traffic encrypted with TLS using a self-signed ECC P-256 certificate
+- **HTTPS + WebSocket** — TLS encrypted using a self-signed ECC P-256 certificate
 - **Authentication** — session-based login with salted SHA-256 password hashing, rate limiting, and automatic lockout
 - **Remote power control** — reset or power-cycle your SBC via GPIO-driven relay/MOSFET
-- **Configurable baud rate** — change serial speed on the fly from the toolbar (9600–1,500,000)
+- **Configurable baud rate** — change serial speed on the fly from the toolbar (9600 to 1,500,000)
 - **OTA firmware update** — upload new firmware from the browser with automatic rollback if the new firmware fails to boot
 - **Device identification** — configurable device name shown in UI, browser tab, DHCP hostname, and mDNS
-- **mDNS** — access your device at `<device-name>.local` (e.g., `Pi-Rack-1.local`)
+- **mDNS** — access your device at `<device-name>.local` (e.g., `pi-rack-1.local`)
 - **NTP time sync** — automatic time from DHCP-provided NTP server, manual server override available
 - **Timezone support** — configurable timezone with preset selections or custom POSIX TZ string
-- **Persistent configuration** — all settings stored in NVS flash
+- **Persistent configuration** — all settings stored in NVS flash, survive reboots and OTA updates
 - **Session log download** — save terminal scrollback to a timestamped `.log` file
 - **System info** — firmware version, chip info, heap usage, uptime visible in Settings
-- **No external dependencies** — vanilla JS frontend embedded in firmware, no build tools or SPIFFS needed
+- **Self-contained firmware** — vanilla JS frontend embedded in the binary, no SPIFFS or external hosting needed
 
 ## Hardware
 
-### Requirements
+### Supported Boards
 
-- **ESP32-C6-DevKitC-1** (or any ESP32-C6 board)
-- Level shifter if your SBC uses 5V logic (ESP32-C6 GPIOs are 3.3V)
-- Relay or MOSFET for power control (optional)
+| Board | Flash | Notes |
+|-------|-------|-------|
+| ESP32-C6-DevKitC-1 | 8MB | Primary target, WiFi 6 |
+| ESP32-C3 Super Mini | 4MB | Compact, low-cost option |
 
-### Wiring
+### Pin Assignments
 
-| Function     | ESP32 GPIO | Connect to       |
-|-------------|-----------|------------------|
-| UART TX      | GPIO10    | SBC RX           |
-| UART RX      | GPIO11    | SBC TX           |
-| SBC Reset    | GPIO22    | SBC reset pin (active-low, normally high-Z) |
-| SBC Power    | GPIO23    | Relay/MOSFET gate |
-| GND          | GND       | SBC GND          |
+Pins are configured per target at compile time.
+
+| Function | ESP32-C6 | ESP32-C3 | Connect to |
+|----------|----------|----------|------------|
+| UART TX  | GPIO10   | GPIO0    | SBC RX     |
+| UART RX  | GPIO11   | GPIO1    | SBC TX     |
+| SBC Reset | GPIO22  | GPIO6    | Reset pin (active-low, normally high-Z) |
+| SBC Power | GPIO23  | GPIO7    | Relay/MOSFET gate |
+| GND      | GND      | GND      | SBC GND    |
+
+> **Note:** ESP32 GPIOs are 3.3V. Use a level shifter if your SBC has 5V logic levels. Power control requires an external relay or MOSFET.
 
 ## Getting Started
 
 ### Prerequisites
 
-- [ESP-IDF](https://docs.espressif.com/projects/esp-idf/en/stable/esp32c6/get-started/) v5.5 or later
-- OpenSSL (for certificate generation)
+- [ESP-IDF](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/get-started/) v5.5 or later
+- OpenSSL (for TLS certificate generation)
 
 ### Build and Flash
 
@@ -57,7 +64,7 @@ A web-based serial terminal for single-board computers (Raspberry Pi, BeagleBone
 2. **Set target and build**:
 
    ```bash
-   idf.py set-target esp32c6
+   idf.py set-target esp32c6   # or esp32c3
    idf.py build
    ```
 
@@ -67,13 +74,18 @@ A web-based serial terminal for single-board computers (Raspberry Pi, BeagleBone
    idf.py -p /dev/ttyUSB0 flash monitor
    ```
 
+> **Switching targets** or changing `sdkconfig.defaults` requires a full clean rebuild:
+> ```bash
+> rm sdkconfig && idf.py fullclean && idf.py set-target esp32c6 && idf.py build
+> ```
+
 ### First-Time Setup
 
 1. Connect to the ESP32's WiFi access point:
    - **SSID:** `ESP-Terminal-XXXX` (last 4 hex digits of MAC)
    - **Password:** `esp32term`
 
-2. Open `https://192.168.4.1` in your browser (accept the self-signed certificate warning).
+2. Open `https://192.168.4.1` in your browser and accept the self-signed certificate warning.
 
 3. Log in with the default credentials:
    - **Username:** `admin`
@@ -81,10 +93,7 @@ A web-based serial terminal for single-board computers (Raspberry Pi, BeagleBone
 
 4. You'll be prompted to change the default password on first login.
 
-5. Open **Settings** to configure:
-   - **Device name** — identifies this unit (shown in UI, DHCP, mDNS)
-   - **WiFi** — enter your network SSID/password to join your LAN
-   - **NTP server** — leave empty for DHCP auto-discovery, or set a specific server
+5. Open **Settings** to configure your device name, WiFi network, and timezone.
 
 Once WiFi is configured, the AP is disabled and the device is accessible at `https://<device-name>.local` or its DHCP-assigned IP.
 
@@ -96,13 +105,13 @@ Once logged in, you'll see a full terminal connected to your SBC's serial port. 
 
 ### Toolbar
 
-- **Device name** — shown at the left of the toolbar
-- **Baud rate** — select from the dropdown to change serial speed (takes effect immediately)
-- **Reset SBC** — sends a reset pulse via GPIO22
-- **Power** — toggles SBC power via GPIO23
+- **Device name** — shown at the left
+- **Baud rate** — dropdown to change serial speed (takes effect immediately)
+- **Reset SBC** — sends a reset pulse via GPIO
+- **Power** — toggles SBC power via GPIO
 - **Firmware version** — shown in the toolbar
 - **Save Log** — download terminal scrollback as a `.log` file
-- **Settings** — device name, WiFi (connect/disconnect), NTP, timezone, password, power-on default, system info, OTA firmware update
+- **Settings** — device name, WiFi, NTP, timezone, password, power-on default, system info, OTA update
 - **Logout** — ends your session
 
 ### WiFi Modes
@@ -113,7 +122,7 @@ Once logged in, you'll see a full terminal connected to your SBC's serial port. 
 | AP+STA | Connecting to STA or STA failed       | Both AP and STA IPs      |
 | STA    | Successfully connected to WiFi        | `https://<IP>` or `https://<name>.local` |
 
-When STA is connected, the AP is disabled to avoid broadcasting. If STA drops, the AP re-enables automatically and a watchdog retries STA every 30 seconds. You can also manually disconnect WiFi from Settings to return to AP mode.
+When STA is connected, the AP is disabled to avoid broadcasting an open network. If STA drops, the AP re-enables automatically and a watchdog retries STA every 30 seconds. You can also manually disconnect WiFi from Settings to return to AP mode.
 
 ### Multiple Devices
 
@@ -130,21 +139,21 @@ Upload new firmware via **Settings > Firmware Update**. The device reboots after
 
 All API endpoints require authentication via session cookie (obtained from `/api/login`).
 
-| Method | Endpoint       | Description                          | Body (JSON)                                      |
+| Method | Endpoint       | Description                          | Body                                             |
 |--------|---------------|--------------------------------------|--------------------------------------------------|
 | POST   | `/api/login`   | Authenticate, returns session token  | `{"username": "...", "password": "..."}`         |
 | POST   | `/api/logout`  | Invalidate session                   | —                                                |
 | GET    | `/api/config`  | Get current configuration            | —                                                |
-| POST   | `/api/config`  | Update configuration                 | See below                                        |
+| POST   | `/api/config`  | Update configuration                 | JSON with fields below                           |
 | POST   | `/api/reset`   | Trigger SBC reset via GPIO           | —                                                |
 | POST   | `/api/power`   | Toggle or set SBC power              | `{"power": true}` or empty for toggle            |
 | POST   | `/api/ota`     | Upload firmware binary               | Raw binary body                                  |
 | GET    | `/api/sysinfo` | System info (chip, heap, uptime)     | —                                                |
-| GET    | `/ws`          | WebSocket for terminal data          | Binary frames (serial data)                      |
+| GET    | `/ws`          | WebSocket for terminal data          | Binary frames                                    |
 
-### Config POST fields
+### Config Fields
 
-All fields are optional; include only what you want to change:
+All fields are optional in POST requests; include only what you want to change:
 
 | Field             | Type    | Description                    |
 |-------------------|---------|--------------------------------|
@@ -155,29 +164,21 @@ All fields are optional; include only what you want to change:
 | `device_name`     | string  | Device identifier              |
 | `ntp_server`      | string  | NTP server (empty = use DHCP)  |
 | `timezone`        | string  | POSIX TZ string (e.g., `EST5EDT,M3.2.0,M11.1.0`) |
-| `wifi_disconnect` | boolean | Set true to disconnect STA and switch to AP |
+| `wifi_disconnect` | boolean | Disconnect STA, switch to AP   |
 | `power_on_default`| boolean | Power on SBC at boot           |
-
-### Config GET response
-
-Returns current state including: `baud_rate`, `power_on`, `power_on_default`, `sta_ssid`, `sta_connected`, `sta_ip`, `ap_ip`, `wifi_mode`, `auth_initialized`, `device_name`, `ntp_server`, `ntp_active_server`, `ntp_synced`, `timezone`, `firmware_version`.
-
-### Sysinfo GET response
-
-Returns: `chip`, `cores`, `revision`, `firmware_version`, `idf_version`, `build_date`, `build_time`, `ota_partition`, `free_heap`, `min_free_heap`, `uptime`, `uptime_seconds`.
 
 ## Security
 
-- **TLS** — all HTTP and WebSocket traffic is encrypted. The self-signed ECC P-256 certificate is embedded in firmware.
-- **Authentication** — passwords are stored as salted SHA-256 hashes in NVS. Plain-text passwords are never stored.
-- **Session management** — up to 4 concurrent sessions, each with a 1-hour timeout. Sessions use 32-byte random tokens.
-- **Rate limiting** — after 5 failed login attempts, login is locked out for 5 minutes.
-- **Default credentials** — `admin`/`admin` with forced password change on first login.
-- **CORS** — API responses restrict cross-origin access.
-- **Paste throttling** — large pastes are chunked (64 bytes at 10ms intervals) to avoid UART buffer overflow.
-- **Navigation guard** — browser warns before closing an active terminal session.
-- **Watchdog** — task watchdog (10s timeout) reboots the device if the system hangs.
-- **OTA rollback** — bad firmware is automatically reverted by the bootloader.
+- **TLS** — all HTTP and WebSocket traffic encrypted with a self-signed ECC P-256 certificate embedded in firmware
+- **Authentication** — salted SHA-256 password hashing stored in NVS; plain-text passwords are never stored
+- **Session management** — up to 4 concurrent sessions with 1-hour timeout, using 32-byte random tokens
+- **Rate limiting** — 5 failed login attempts triggers a 5-minute lockout
+- **Default credentials** — `admin`/`admin` with forced password change on first login
+- **CORS** — API responses restrict cross-origin access
+- **Paste throttling** — large pastes chunked (64 bytes / 10ms) to prevent UART buffer overflow
+- **Navigation guard** — browser warns before closing an active terminal session
+- **Watchdog** — task watchdog (10s timeout) reboots the device on hang
+- **OTA rollback** — bootloader automatically reverts bad firmware
 
 ## Project Structure
 
@@ -187,7 +188,7 @@ main/
   config.c/h        NVS persistent configuration
   wifi_manager.c/h  AP + STA WiFi, mDNS, reconnect watchdog
   auth.c/h          Session auth, salted SHA-256, rate limiting
-  uart_bridge.c/h   UART ↔ WebSocket bridge
+  uart_bridge.c/h   UART <-> WebSocket bridge
   web_server.c/h    HTTPS server, REST API, WebSocket, OTA
   gpio_control.c/h  SBC reset and power control
 frontend/
@@ -198,16 +199,10 @@ certs/
   generate_cert.sh  Generates self-signed ECC P-256 cert
 ```
 
-## Partition Table
+## Contributing
 
-| Partition | Type | Size    | Purpose          |
-|-----------|------|---------|------------------|
-| nvs       | data | 24 KB   | Configuration    |
-| otadata   | data | 8 KB    | OTA boot state   |
-| ota_0     | app  | 1920 KB | Firmware slot A  |
-| ota_1     | app  | 1920 KB | Firmware slot B  |
-| storage   | data | 128 KB  | Reserved         |
+See [CONTRIBUTING.md](CONTRIBUTING.md) for build instructions, coding guidelines, and how to submit changes.
 
 ## License
 
-MIT
+[MIT](LICENSE)

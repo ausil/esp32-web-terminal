@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Dennis Gilmore
+
 #include "uart_bridge.h"
 #include "driver/uart.h"
 #include "esp_log.h"
