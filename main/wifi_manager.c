@@ -334,6 +334,24 @@ esp_err_t wifi_manager_disconnect_sta(void)
     return ESP_OK;
 }
 
+esp_err_t wifi_manager_update_ap(const char *ssid, const char *password)
+{
+    // Persist new AP config
+    esp_err_t err = config_set_wifi_ap(ssid, password);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    // Rebuild AP SSID with MAC suffix
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
+    char ap_ssid[40];
+    snprintf(ap_ssid, sizeof(ap_ssid), "%s-%02X%02X", ssid, mac[4], mac[5]);
+
+    // Reconfigure the running AP
+    return start_ap(ap_ssid, password);
+}
+
 wifi_manager_status_t wifi_manager_get_status(void)
 {
     return s_status;

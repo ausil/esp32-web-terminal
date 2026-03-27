@@ -389,6 +389,7 @@ static esp_err_t handle_config_get(httpd_req_t *req)
     cJSON_AddNumberToObject(root, "baud_rate", conf->baud_rate);
     cJSON_AddBoolToObject(root, "power_on", gpio.power_on);
     cJSON_AddBoolToObject(root, "power_on_default", conf->power_on_default);
+    cJSON_AddStringToObject(root, "ap_ssid", conf->ap_ssid);
     cJSON_AddStringToObject(root, "sta_ssid", conf->sta_ssid);
     cJSON_AddBoolToObject(root, "sta_connected", wifi.sta_connected);
     cJSON_AddStringToObject(root, "sta_ip", wifi.sta_ip);
@@ -441,6 +442,20 @@ static esp_err_t handle_config_post(httpd_req_t *req)
             config_set_baud_rate(new_baud);
             uart_bridge_set_baud_rate(new_baud);
         }
+    }
+
+    const cJSON *ap_ssid = cJSON_GetObjectItem(json, "ap_ssid");
+    const cJSON *ap_pass = cJSON_GetObjectItem(json, "ap_pass");
+    if (cJSON_IsString(ap_ssid) && cJSON_IsString(ap_pass)) {
+        if (strlen(ap_ssid->valuestring) == 0 || strlen(ap_ssid->valuestring) > 32) {
+            cJSON_Delete(json);
+            return send_json_error(req, 400, "AP SSID must be 1-32 characters");
+        }
+        if (strlen(ap_pass->valuestring) > 0 && strlen(ap_pass->valuestring) < 8) {
+            cJSON_Delete(json);
+            return send_json_error(req, 400, "AP password must be 8+ characters or empty for open");
+        }
+        wifi_manager_update_ap(ap_ssid->valuestring, ap_pass->valuestring);
     }
 
     const cJSON *ssid = cJSON_GetObjectItem(json, "sta_ssid");

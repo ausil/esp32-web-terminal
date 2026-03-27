@@ -165,6 +165,13 @@ body {
                 <button id="btn-wifi-disconnect" class="danger" style="display:none;margin-top:8px">Disconnect WiFi</button>
             </fieldset>
             <fieldset>
+                <legend>WiFi Access Point (AP)</legend>
+                <input type="text" id="ap-ssid" placeholder="AP SSID" autocomplete="off" maxlength="32">
+                <div style="font-size:11px;color:var(--dim);margin-bottom:6px">MAC suffix (-XXXX) is appended automatically</div>
+                <input type="password" id="ap-pass" placeholder="AP Password (8+ chars, or empty for open)" autocomplete="off" maxlength="64">
+                <button id="btn-ap-save">Save AP Settings</button>
+            </fieldset>
+            <fieldset>
                 <legend>Change Password</legend>
                 <input type="password" id="cur-pass" placeholder="Current password" autocomplete="current-password">
                 <input type="password" id="new-pass" placeholder="New password" autocomplete="new-password">
@@ -572,6 +579,9 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
             }
             if (!found) { tzSelect.selectedIndex = 0; tzCustom.value = tzVal; }
             else { tzCustom.value = ""; }
+            // AP settings
+            document.getElementById("ap-ssid").value = conf.ap_ssid || "";
+            document.getElementById("ap-pass").value = "";
         });
     });
 
@@ -583,6 +593,20 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
         var server = document.getElementById("ntp-server").value.trim();
         api("POST", "/api/config", {ntp_server: server}, function(err, res) {
             showSettingsMsg(!err && res && res.ok ? "NTP server saved (reboot to apply)" : ((res && res.error) || "Failed"), !(!err && res && res.ok));
+        });
+    });
+
+    document.getElementById("btn-ap-save").addEventListener("click", function() {
+        var ssid = document.getElementById("ap-ssid").value.trim();
+        var pass = document.getElementById("ap-pass").value;
+        if (!ssid) { showSettingsMsg("AP SSID required", true); return; }
+        if (pass && pass.length < 8) { showSettingsMsg("AP password must be 8+ characters or empty for open", true); return; }
+        api("POST", "/api/config", {ap_ssid: ssid, ap_pass: pass}, function(err, res) {
+            if (!err && res && res.ok) {
+                showSettingsMsg("AP settings saved. New SSID: " + ssid + "-XXXX");
+            } else {
+                showSettingsMsg((res && res.error) || "Failed", true);
+            }
         });
     });
 
