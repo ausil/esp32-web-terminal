@@ -19,6 +19,8 @@
 #include "nvs.h"
 #include "mbedtls/x509_crt.h"
 #include "mbedtls/pk.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -104,28 +106,34 @@ typedef struct {
 } ws_client_t;
 
 static ws_client_t s_ws_clients[MAX_WS_CLIENTS];
+static SemaphoreHandle_t s_ws_mutex = NULL;
 
 static void ws_add_client(int fd)
 {
+    xSemaphoreTake(s_ws_mutex, portMAX_DELAY);
     for (int i = 0; i < MAX_WS_CLIENTS; i++) {
         if (!s_ws_clients[i].active) {
             s_ws_clients[i].fd = fd;
             s_ws_clients[i].active = true;
+            xSemaphoreGive(s_ws_mutex);
             ESP_LOGI(TAG, "WS client added: fd=%d slot=%d", fd, i);
             return;
         }
     }
+    xSemaphoreGive(s_ws_mutex);
     ESP_LOGW(TAG, "WS client slots full, rejecting fd=%d", fd);
 }
 
 static void ws_remove_client(int fd)
 {
+    xSemaphoreTake(s_ws_mutex, portMAX_DELAY);
     for (int i = 0; i < MAX_WS_CLIENTS; i++) {
         if (s_ws_clients[i].active && s_ws_clients[i].fd == fd) {
             s_ws_clients[i].active = false;
-            return;
+            break;
         }
     }
+    xSemaphoreGive(s_ws_mutex);
 }
 
 void web_server_ws_broadcast(const uint8_t *data, size_t len)
@@ -138,6 +146,7 @@ void web_server_ws_broadcast(const uint8_t *data, size_t len)
         .len = len,
     };
 
+    xSemaphoreTake(s_ws_mutex, portMAX_DELAY);
     for (int i = 0; i < MAX_WS_CLIENTS; i++) {
         if (s_ws_clients[i].active) {
             esp_err_t err = httpd_ws_send_frame_async(s_server, s_ws_clients[i].fd, &ws_pkt);
@@ -146,6 +155,7 @@ void web_server_ws_broadcast(const uint8_t *data, size_t len)
             }
         }
     }
+    xSemaphoreGive(s_ws_mutex);
 }
 
 // --- Helpers ---
@@ -661,9 +671,9 @@ static esp_err_t handle_tls_upload(httpd_req_t *req)
     mbedtls_x509_crt x509;
     mbedtls_x509_crt_init(&x509);
     int ret = mbedtls_x509_crt_parse(&x509, (const unsigned char *)cert->valuestring, cert_len);
-    mbedtls_x509_crt_free(&x509);
     if (ret != 0) {
         ESP_LOGE(TAG, "TLS cert parse failed: -0x%04x", -ret);
+        mbedtls_x509_crt_free(&x509);
         cJSON_Delete(json);
         return send_json_error(req, 400, "Invalid certificate");
     }
@@ -676,11 +686,26 @@ static esp_err_t handle_tls_upload(httpd_req_t *req)
 #else
     ret = mbedtls_pk_parse_key(&pk, (const unsigned char *)key->valuestring, key_len, NULL, 0, NULL, NULL);
 #endif
-    mbedtls_pk_free(&pk);
     if (ret != 0) {
         ESP_LOGE(TAG, "TLS key parse failed: -0x%04x", -ret);
+        mbedtls_pk_free(&pk);
+        mbedtls_x509_crt_free(&x509);
         cJSON_Delete(json);
         return send_json_error(req, 400, "Invalid private key");
+    }
+
+    // Verify cert and key match
+#if defined(MBEDTLS_MAJOR_VERSION) && MBEDTLS_MAJOR_VERSION >= 4
+    ret = mbedtls_pk_check_pair(&x509.pk, &pk);
+#else
+    ret = mbedtls_pk_check_pair(&x509.pk, &pk, NULL, NULL);
+#endif
+    mbedtls_pk_free(&pk);
+    mbedtls_x509_crt_free(&x509);
+    if (ret != 0) {
+        ESP_LOGE(TAG, "TLS cert/key mismatch: -0x%04x", -ret);
+        cJSON_Delete(json);
+        return send_json_error(req, 400, "Certificate and key do not match");
     }
     if (cert_len > MAX_CERT_SIZE || key_len > MAX_CERT_SIZE) {
         cJSON_Delete(json);
@@ -797,9 +822,11 @@ static esp_err_t handle_ws(httpd_req_t *req)
     /* Data frame — ensure this client is tracked (in case handshake tracking missed it) */
     int fd = httpd_req_to_sockfd(req);
     bool found = false;
+    xSemaphoreTake(s_ws_mutex, portMAX_DELAY);
     for (int i = 0; i < MAX_WS_CLIENTS; i++) {
         if (s_ws_clients[i].active && s_ws_clients[i].fd == fd) { found = true; break; }
     }
+    xSemaphoreGive(s_ws_mutex);
     if (!found) {
         ws_add_client(fd);
         ESP_LOGI(TAG, "WS client late-added: fd=%d", fd);
@@ -840,6 +867,8 @@ static void on_close(httpd_handle_t hd, int sockfd)
 esp_err_t web_server_init(void)
 {
     memset(s_ws_clients, 0, sizeof(s_ws_clients));
+    s_ws_mutex = xSemaphoreCreateMutex();
+    assert(s_ws_mutex);
     load_or_save_certs();
     return ESP_OK;
 }

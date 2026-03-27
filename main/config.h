@@ -35,6 +35,7 @@ typedef struct {
     uint8_t auth_hash[CONFIG_AUTH_HASH_LEN];
     uint8_t auth_salt[CONFIG_AUTH_SALT_LEN];
     bool auth_initialized;  // true after first password change
+    uint8_t auth_hash_ver;  // 0=legacy SHA-256, 1=PBKDF2-HMAC-SHA256
     char device_name[CONFIG_DEVICE_NAME_MAX_LEN + 1];
     char ntp_server[CONFIG_NTP_SERVER_MAX_LEN + 1];  // empty = use DHCP
     char timezone[CONFIG_TIMEZONE_MAX_LEN + 1];     // POSIX TZ string
