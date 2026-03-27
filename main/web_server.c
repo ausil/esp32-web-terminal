@@ -44,7 +44,7 @@ extern const uint8_t server_key_end[]   asm("_binary_server_key_end");
 
 // --- Persistent TLS certs (survive OTA updates via NVS) ---
 #define NVS_CERTS_NAMESPACE "tls_certs"
-#define MAX_CERT_SIZE 2048
+#define MAX_CERT_SIZE 4096
 
 static char *s_cert_pem = NULL;
 static char *s_key_pem = NULL;
@@ -581,6 +581,92 @@ static esp_err_t handle_ota(httpd_req_t *req)
     return ESP_OK;
 }
 
+// --- ESP reboot handler ---
+
+static esp_err_t handle_esp_reboot(httpd_req_t *req)
+{
+    if (!require_auth(req)) return ESP_OK;
+    ESP_LOGI(TAG, "ESP reboot requested via API");
+    httpd_resp_set_type(req, "application/json");
+    set_cors_headers(req);
+    httpd_resp_send(req, "{\"ok\":true,\"message\":\"Rebooting...\"}", HTTPD_RESP_USE_STRLEN);
+    vTaskDelay(pdMS_TO_TICKS(500));
+    esp_restart();
+    return ESP_OK;
+}
+
+// --- TLS certificate upload handler ---
+
+static esp_err_t handle_tls_upload(httpd_req_t *req)
+{
+    if (!require_auth(req)) return ESP_OK;
+
+    if (req->content_len == 0 || req->content_len > 8192) {
+        return send_json_error(req, 400, "Invalid content length");
+    }
+
+    char *buf = malloc(req->content_len + 1);
+    if (!buf) return send_json_error(req, 400, "Out of memory");
+
+    int len = httpd_req_recv(req, buf, req->content_len);
+    if (len <= 0) {
+        free(buf);
+        return send_json_error(req, 400, "Failed to read body");
+    }
+    buf[len] = '\0';
+
+    cJSON *json = cJSON_Parse(buf);
+    free(buf);
+    if (!json) return send_json_error(req, 400, "Invalid JSON");
+
+    const cJSON *cert = cJSON_GetObjectItem(json, "cert");
+    const cJSON *key  = cJSON_GetObjectItem(json, "key");
+
+    if (!cJSON_IsString(cert) || !cJSON_IsString(key)) {
+        cJSON_Delete(json);
+        return send_json_error(req, 400, "Missing cert or key");
+    }
+
+    if (strncmp(cert->valuestring, "-----BEGIN CERTIFICATE-----", 27) != 0) {
+        cJSON_Delete(json);
+        return send_json_error(req, 400, "Invalid certificate PEM");
+    }
+    if (strncmp(key->valuestring, "-----BEGIN", 10) != 0) {
+        cJSON_Delete(json);
+        return send_json_error(req, 400, "Invalid key PEM");
+    }
+
+    size_t cert_len = strlen(cert->valuestring) + 1;
+    size_t key_len  = strlen(key->valuestring) + 1;
+    if (cert_len > MAX_CERT_SIZE || key_len > MAX_CERT_SIZE) {
+        cJSON_Delete(json);
+        return send_json_error(req, 400, "Cert or key exceeds 4096 bytes");
+    }
+
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open(NVS_CERTS_NAMESPACE, NVS_READWRITE, &nvs);
+    if (err != ESP_OK) {
+        cJSON_Delete(json);
+        return send_json_error(req, 400, "NVS open failed");
+    }
+    nvs_set_blob(nvs, "cert", cert->valuestring, cert_len);
+    nvs_set_blob(nvs, "key",  key->valuestring,  key_len);
+    err = nvs_commit(nvs);
+    nvs_close(nvs);
+    cJSON_Delete(json);
+
+    if (err != ESP_OK) {
+        return send_json_error(req, 400, "Failed to save certs");
+    }
+
+    ESP_LOGI(TAG, "TLS certs updated via API (cert=%d key=%d bytes), reboot required",
+             (int)cert_len, (int)key_len);
+    httpd_resp_set_type(req, "application/json");
+    set_cors_headers(req);
+    return httpd_resp_send(req, "{\"ok\":true,\"message\":\"TLS certs updated, reboot to apply\"}",
+                           HTTPD_RESP_USE_STRLEN);
+}
+
 // --- GitHub OTA handlers ---
 
 static esp_err_t handle_ota_check(httpd_req_t *req)
@@ -718,7 +804,7 @@ esp_err_t web_server_start(void)
 {
     httpd_ssl_config_t config = HTTPD_SSL_CONFIG_DEFAULT();
     config.httpd.max_open_sockets = 4;
-    config.httpd.max_uri_handlers = 16;
+    config.httpd.max_uri_handlers = 20;
     config.httpd.stack_size = 10240;
     config.httpd.lru_purge_enable = true;
     config.httpd.close_fn = on_close;
@@ -753,6 +839,8 @@ esp_err_t web_server_start(void)
     const httpd_uri_t route_wifi_scan = { .uri = "/api/wifi/scan", .method = HTTP_GET, .handler = handle_wifi_scan };
     const httpd_uri_t route_ota_check = { .uri = "/api/ota/check", .method = HTTP_GET, .handler = handle_ota_check };
     const httpd_uri_t route_ota_github = { .uri = "/api/ota/github", .method = HTTP_POST, .handler = handle_ota_github };
+    const httpd_uri_t route_tls = { .uri = "/api/tls", .method = HTTP_POST, .handler = handle_tls_upload };
+    const httpd_uri_t route_reboot = { .uri = "/api/reboot", .method = HTTP_POST, .handler = handle_esp_reboot };
 
     /* WebSocket */
     const httpd_uri_t route_ws = { .uri = "/ws", .method = HTTP_GET, .handler = handle_ws, .is_websocket = true };
@@ -770,6 +858,8 @@ esp_err_t web_server_start(void)
     httpd_register_uri_handler(s_server, &route_wifi_scan);
     httpd_register_uri_handler(s_server, &route_ota_check);
     httpd_register_uri_handler(s_server, &route_ota_github);
+    httpd_register_uri_handler(s_server, &route_tls);
+    httpd_register_uri_handler(s_server, &route_reboot);
     httpd_register_uri_handler(s_server, &route_ws);
 
     httpd_register_err_handler(s_server, HTTPD_404_NOT_FOUND, handle_404);

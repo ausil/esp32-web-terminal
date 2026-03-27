@@ -139,6 +139,7 @@ body {
         <button id="btn-reset" class="danger">Reset SBC</button>
         <button id="btn-power" class="power-on">Power: ON</button>
         <button id="btn-save-log">Save Log</button>
+        <button id="btn-esp-reboot" class="danger">Reboot ESP</button>
         <button id="btn-settings">Settings</button>
         <button id="btn-logout">Logout</button>
     </div>
@@ -429,6 +430,13 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
                 updatePowerButton(res.power_on);
                 if (term) term.writeln("\r\n[SBC power " + (res.power_on ? "ON" : "OFF") + "]\r\n");
             }
+        });
+    });
+
+    document.getElementById("btn-esp-reboot").addEventListener("click", function() {
+        if (!confirm("Reboot the ESP32? You will be disconnected briefly.")) return;
+        api("POST", "/api/reboot", null, function(err, res) {
+            if (!err && res && res.ok && term) term.writeln("\r\n[ESP32 rebooting...]\r\n");
         });
     });
 
