@@ -224,6 +224,14 @@ body {
                     </div>
                 </div>
             </fieldset>
+            <fieldset>
+                <legend>TLS Certificate</legend>
+                <div style="font-size:12px;color:var(--dim);margin-bottom:8px">Upload a PEM certificate and private key. Reboot to apply.</div>
+                <textarea id="tls-cert" placeholder="-----BEGIN CERTIFICATE-----" autocomplete="off" rows="4" style="width:100%;margin-bottom:8px;padding:6px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-size:12px;font-family:monospace;resize:vertical"></textarea>
+                <textarea id="tls-key" placeholder="-----BEGIN EC PRIVATE KEY-----" autocomplete="off" rows="4" style="width:100%;margin-bottom:8px;padding:6px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-size:12px;font-family:monospace;resize:vertical"></textarea>
+                <button id="btn-tls-upload">Upload Certificate</button>
+                <div id="tls-status" style="font-size:13px;margin-top:8px;min-height:16px"></div>
+            </fieldset>
             <button id="btn-settings-close">Close</button>
         </div>
     </div>
@@ -791,6 +799,27 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
         };
 
         xhr.send(file);
+    });
+
+    // --- TLS cert upload ---
+
+    document.getElementById("btn-tls-upload").addEventListener("click", function() {
+        var cert = document.getElementById("tls-cert").value.trim();
+        var key  = document.getElementById("tls-key").value.trim();
+        var status = document.getElementById("tls-status");
+        if (!cert || !key) { status.textContent = "Enter both certificate and key"; status.style.color = "var(--danger)"; return; }
+        if (!confirm("Upload new TLS certificate? A reboot will be required to apply it.")) return;
+        api("POST", "/api/tls", {cert: cert, key: key}, function(err, res) {
+            if (!err && res && res.ok) {
+                status.textContent = res.message || "Certificate uploaded. Reboot to apply.";
+                status.style.color = "var(--success)";
+                document.getElementById("tls-cert").value = "";
+                document.getElementById("tls-key").value = "";
+            } else {
+                status.textContent = (res && res.error) || "Upload failed";
+                status.style.color = "var(--danger)";
+            }
+        });
     });
 
     // --- Startup ---
