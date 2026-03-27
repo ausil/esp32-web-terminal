@@ -212,9 +212,18 @@ esp_err_t config_set_auth(const char *username, const char *password)
     return save_to_nvs();
 }
 
+static int constant_time_compare(const uint8_t *a, const uint8_t *b, size_t len)
+{
+    volatile uint8_t diff = 0;
+    for (size_t i = 0; i < len; i++) {
+        diff |= a[i] ^ b[i];
+    }
+    return diff == 0;
+}
+
 bool config_check_password(const char *password)
 {
     uint8_t hash[CONFIG_AUTH_HASH_LEN];
     compute_hash(password, s_config.auth_salt, hash);
-    return memcmp(hash, s_config.auth_hash, CONFIG_AUTH_HASH_LEN) == 0;
+    return constant_time_compare(hash, s_config.auth_hash, CONFIG_AUTH_HASH_LEN);
 }

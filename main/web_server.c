@@ -17,6 +17,8 @@
 #include "cJSON.h"
 #include "nvs_flash.h"
 #include "nvs.h"
+#include "mbedtls/x509_crt.h"
+#include "mbedtls/pk.h"
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -227,6 +229,10 @@ static esp_err_t handle_login(httpd_req_t *req)
         return send_json_error(req, 429, "Too many failed attempts. Try again later.");
     }
 
+    if (req->content_len == 0 || req->content_len >= 256) {
+        return send_json_error(req, 400, "Invalid request size");
+    }
+
     char buf[256];
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (len <= 0) return send_json_error(req, 400, "Empty request body");
@@ -254,11 +260,11 @@ static esp_err_t handle_login(httpd_req_t *req)
     httpd_resp_set_type(req, "application/json");
 
     app_config_t *conf = config_get();
-    char resp[256];
-    snprintf(resp, sizeof(resp),
-             "{\"token\":\"%s\",\"must_change_password\":%s}",
-             token, conf->auth_initialized ? "false" : "true");
     free(token);
+    char resp[64];
+    snprintf(resp, sizeof(resp),
+             "{\"ok\":true,\"must_change_password\":%s}",
+             conf->auth_initialized ? "false" : "true");
     return httpd_resp_send(req, resp, strlen(resp));
 }
 
@@ -401,6 +407,10 @@ static esp_err_t handle_config_post(httpd_req_t *req)
 {
     if (!require_auth(req)) return ESP_OK;
 
+    if (req->content_len == 0 || req->content_len >= 512) {
+        return send_json_error(req, 400, "Invalid request size");
+    }
+
     char buf[512];
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (len <= 0) return send_json_error(req, 400, "Empty request body");
@@ -412,8 +422,15 @@ static esp_err_t handle_config_post(httpd_req_t *req)
     const cJSON *baud = cJSON_GetObjectItem(json, "baud_rate");
     if (cJSON_IsNumber(baud)) {
         uint32_t new_baud = (uint32_t)baud->valuedouble;
-        config_set_baud_rate(new_baud);
-        uart_bridge_set_baud_rate(new_baud);
+        static const uint32_t valid_bauds[] = {9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600, 1500000};
+        bool valid = false;
+        for (int i = 0; i < sizeof(valid_bauds) / sizeof(valid_bauds[0]); i++) {
+            if (new_baud == valid_bauds[i]) { valid = true; break; }
+        }
+        if (valid) {
+            config_set_baud_rate(new_baud);
+            uart_bridge_set_baud_rate(new_baud);
+        }
     }
 
     const cJSON *ssid = cJSON_GetObjectItem(json, "sta_ssid");
@@ -452,10 +469,16 @@ static esp_err_t handle_config_post(httpd_req_t *req)
 
     const cJSON *new_pass = cJSON_GetObjectItem(json, "new_password");
     if (cJSON_IsString(new_pass)) {
+        const cJSON *cur_pass = cJSON_GetObjectItem(json, "current_password");
+        if (!cJSON_IsString(cur_pass) || !config_check_password(cur_pass->valuestring)) {
+            cJSON_Delete(json);
+            return send_json_error(req, 401, "Current password required");
+        }
         const char *user = config_get()->auth_user;
         const cJSON *new_user = cJSON_GetObjectItem(json, "username");
         if (cJSON_IsString(new_user)) user = new_user->valuestring;
         config_set_auth(user, new_pass->valuestring);
+        auth_invalidate_all_sessions();
     }
 
     cJSON_Delete(json);
@@ -475,6 +498,10 @@ static esp_err_t handle_reset(httpd_req_t *req)
 static esp_err_t handle_power(httpd_req_t *req)
 {
     if (!require_auth(req)) return ESP_OK;
+
+    if (req->content_len >= 128) {
+        return send_json_error(req, 400, "Invalid request size");
+    }
 
     char buf[128];
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
@@ -627,17 +654,30 @@ static esp_err_t handle_tls_upload(httpd_req_t *req)
         return send_json_error(req, 400, "Missing cert or key");
     }
 
-    if (strncmp(cert->valuestring, "-----BEGIN CERTIFICATE-----", 27) != 0) {
-        cJSON_Delete(json);
-        return send_json_error(req, 400, "Invalid certificate PEM");
-    }
-    if (strncmp(key->valuestring, "-----BEGIN", 10) != 0) {
-        cJSON_Delete(json);
-        return send_json_error(req, 400, "Invalid key PEM");
-    }
-
     size_t cert_len = strlen(cert->valuestring) + 1;
     size_t key_len  = strlen(key->valuestring) + 1;
+
+    // Validate certificate with mbedtls
+    mbedtls_x509_crt x509;
+    mbedtls_x509_crt_init(&x509);
+    int ret = mbedtls_x509_crt_parse(&x509, (const unsigned char *)cert->valuestring, cert_len);
+    mbedtls_x509_crt_free(&x509);
+    if (ret != 0) {
+        ESP_LOGE(TAG, "TLS cert parse failed: -0x%04x", -ret);
+        cJSON_Delete(json);
+        return send_json_error(req, 400, "Invalid certificate");
+    }
+
+    // Validate private key with mbedtls
+    mbedtls_pk_context pk;
+    mbedtls_pk_init(&pk);
+    ret = mbedtls_pk_parse_key(&pk, (const unsigned char *)key->valuestring, key_len, NULL, 0);
+    mbedtls_pk_free(&pk);
+    if (ret != 0) {
+        ESP_LOGE(TAG, "TLS key parse failed: -0x%04x", -ret);
+        cJSON_Delete(json);
+        return send_json_error(req, 400, "Invalid private key");
+    }
     if (cert_len > MAX_CERT_SIZE || key_len > MAX_CERT_SIZE) {
         cJSON_Delete(json);
         return send_json_error(req, 400, "Cert or key exceeds 4096 bytes");

@@ -31,5 +31,8 @@ char *auth_get_token_from_request(httpd_req_t *req);
 // Check if request is authenticated. Returns true if valid session.
 bool auth_check_request(httpd_req_t *req);
 
+// Invalidate all active sessions (e.g., after password change).
+void auth_invalidate_all_sessions(void);
+
 // Returns true if login is currently locked out due to failed attempts.
 bool auth_is_locked_out(void);

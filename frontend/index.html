@@ -166,6 +166,7 @@ body {
             </fieldset>
             <fieldset>
                 <legend>Change Password</legend>
+                <input type="password" id="cur-pass" placeholder="Current password" autocomplete="current-password">
                 <input type="password" id="new-pass" placeholder="New password" autocomplete="new-password">
                 <input type="password" id="new-pass2" placeholder="Confirm password" autocomplete="new-password">
                 <button id="btn-pass-save">Change Password</button>
@@ -277,7 +278,6 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
         var xhr = new XMLHttpRequest();
         xhr.open(method, url, true);
         xhr.setRequestHeader("Content-Type", "application/json");
-        if (sessionToken) xhr.setRequestHeader("Authorization", "Bearer " + sessionToken);
         xhr.onload = function() {
             try { cb(null, JSON.parse(xhr.responseText), xhr.status); }
             catch(e) { cb(e); }
@@ -339,7 +339,7 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
         if (!sessionToken || !term) return;
 
         var proto = location.protocol === "https:" ? "wss:" : "ws:";
-        ws = new WebSocket(proto + "//" + location.host + "/ws?token=" + encodeURIComponent(sessionToken));
+        ws = new WebSocket(proto + "//" + location.host + "/ws");
         ws.binaryType = "arraybuffer";
 
         ws.onopen = function() { setStatus(true, "Connected"); };
@@ -360,7 +360,7 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
     // --- Auth ---
 
     function onLoginSuccess(data) {
-        sessionToken = data.token;
+        sessionToken = "cookie";
         loginOverlay.classList.add("hidden");
         loadConfig();
         // connectWs is called by initTerminal or after xterm loads
@@ -490,13 +490,22 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
         api("GET", "/api/sysinfo", null, function(err, info) {
             var el = document.getElementById("sysinfo");
             if (err || !info) { el.textContent = "Failed to load"; return; }
-            el.innerHTML =
-                "<b>Firmware:</b> " + info.firmware_version + " (built " + info.build_date + " " + info.build_time + ")<br>" +
-                "<b>ESP-IDF:</b> " + info.idf_version + "<br>" +
-                "<b>Chip:</b> " + info.chip + " rev " + info.revision + " (" + info.cores + " core" + (info.cores > 1 ? "s" : "") + ")<br>" +
-                "<b>Partition:</b> " + info.ota_partition + "<br>" +
-                "<b>Free heap:</b> " + (info.free_heap / 1024).toFixed(0) + " KB (min: " + (info.min_free_heap / 1024).toFixed(0) + " KB)<br>" +
-                "<b>Uptime:</b> " + info.uptime;
+            el.textContent = "";
+            var lines = [
+                ["Firmware", info.firmware_version + " (built " + info.build_date + " " + info.build_time + ")"],
+                ["ESP-IDF", info.idf_version],
+                ["Chip", info.chip + " rev " + info.revision + " (" + info.cores + " core" + (info.cores > 1 ? "s" : "") + ")"],
+                ["Partition", info.ota_partition],
+                ["Free heap", (info.free_heap / 1024).toFixed(0) + " KB (min: " + (info.min_free_heap / 1024).toFixed(0) + " KB)"],
+                ["Uptime", info.uptime]
+            ];
+            lines.forEach(function(pair) {
+                var b = document.createElement("b");
+                b.textContent = pair[0] + ": ";
+                el.appendChild(b);
+                el.appendChild(document.createTextNode(pair[1]));
+                el.appendChild(document.createElement("br"));
+            });
         });
         api("GET", "/api/config", null, function(err, conf) {
             if (err || !conf) return;
@@ -597,7 +606,6 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
         btn.textContent = "Scanning...";
         var xhr = new XMLHttpRequest();
         xhr.open("GET", "/api/wifi/scan", true);
-        if (sessionToken) xhr.setRequestHeader("Authorization", "Bearer " + sessionToken);
         xhr.timeout = 15000;
         xhr.onload = function() {
             btn.disabled = false;
@@ -649,15 +657,25 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
     });
 
     document.getElementById("btn-pass-save").addEventListener("click", function() {
+        var cp = document.getElementById("cur-pass").value;
         var p1 = document.getElementById("new-pass").value;
         var p2 = document.getElementById("new-pass2").value;
+        if (!cp) { showSettingsMsg("Enter current password", true); return; }
         if (!p1 || p1.length < 4) { showSettingsMsg("Min 4 characters", true); return; }
         if (p1 !== p2) { showSettingsMsg("Passwords don't match", true); return; }
-        api("POST", "/api/config", {new_password: p1}, function(err, res) {
+        api("POST", "/api/config", {current_password: cp, new_password: p1}, function(err, res) {
             if (!err && res && res.ok) {
-                showSettingsMsg("Password changed");
+                showSettingsMsg("Password changed. Please log in again.");
+                document.getElementById("cur-pass").value = "";
                 document.getElementById("new-pass").value = "";
                 document.getElementById("new-pass2").value = "";
+                // Sessions invalidated server-side, redirect to login
+                setTimeout(function() {
+                    sessionToken = null;
+                    if (ws) ws.close();
+                    loginOverlay.classList.remove("hidden");
+                    settingsOverlay.classList.add("hidden");
+                }, 1500);
             } else {
                 showSettingsMsg((res && res.error) || "Failed", true);
             }
@@ -683,7 +701,6 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
         installBtn.style.display = "none";
         var xhr = new XMLHttpRequest();
         xhr.open("GET", "/api/ota/check", true);
-        if (sessionToken) xhr.setRequestHeader("Authorization", "Bearer " + sessionToken);
         xhr.timeout = 15000;
         xhr.onload = function() {
             btn.disabled = false;
@@ -716,7 +733,6 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
         status.style.color = "var(--dim)";
         var xhr = new XMLHttpRequest();
         xhr.open("POST", "/api/ota/github", true);
-        if (sessionToken) xhr.setRequestHeader("Authorization", "Bearer " + sessionToken);
         xhr.timeout = 120000;
         xhr.onload = function() {
             try {
@@ -765,7 +781,6 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
         var xhr = new XMLHttpRequest();
         xhr.open("POST", "/api/ota", true);
         xhr.setRequestHeader("Content-Type", "application/octet-stream");
-        if (sessionToken) xhr.setRequestHeader("Authorization", "Bearer " + sessionToken);
 
         xhr.upload.onprogress = function(e) {
             if (e.lengthComputable) {

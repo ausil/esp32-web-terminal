@@ -143,6 +143,14 @@ void auth_logout(const char *token)
     }
 }
 
+void auth_invalidate_all_sessions(void)
+{
+    for (int i = 0; i < AUTH_MAX_SESSIONS; i++) {
+        s_sessions[i].active = false;
+    }
+    ESP_LOGI(TAG, "All sessions invalidated");
+}
+
 char *auth_get_token_from_request(httpd_req_t *req)
 {
     // Check cookie first
