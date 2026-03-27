@@ -671,7 +671,11 @@ static esp_err_t handle_tls_upload(httpd_req_t *req)
     // Validate private key with mbedtls
     mbedtls_pk_context pk;
     mbedtls_pk_init(&pk);
+#if defined(MBEDTLS_MAJOR_VERSION) && MBEDTLS_MAJOR_VERSION >= 4
     ret = mbedtls_pk_parse_key(&pk, (const unsigned char *)key->valuestring, key_len, NULL, 0);
+#else
+    ret = mbedtls_pk_parse_key(&pk, (const unsigned char *)key->valuestring, key_len, NULL, 0, NULL, NULL);
+#endif
     mbedtls_pk_free(&pk);
     if (ret != 0) {
         ESP_LOGE(TAG, "TLS key parse failed: -0x%04x", -ret);
