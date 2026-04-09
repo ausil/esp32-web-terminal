@@ -19,6 +19,10 @@
 #include "nvs.h"
 #include "mbedtls/x509_crt.h"
 #include "mbedtls/pk.h"
+#include "mbedtls/version.h"
+#if defined(MBEDTLS_MAJOR_VERSION) && MBEDTLS_MAJOR_VERSION >= 4
+#include "psa/crypto.h"
+#endif
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include <string.h>
@@ -681,6 +685,11 @@ static esp_err_t handle_tls_upload(httpd_req_t *req)
 
     size_t cert_len = strlen(cert->valuestring) + 1;
     size_t key_len  = strlen(key->valuestring) + 1;
+
+    // Ensure PSA crypto is initialized (required by mbedtls v4 for RSA operations)
+#if defined(MBEDTLS_MAJOR_VERSION) && MBEDTLS_MAJOR_VERSION >= 4
+    psa_crypto_init();
+#endif
 
     // Validate certificate with mbedtls
     mbedtls_x509_crt x509;
