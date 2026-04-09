@@ -17,6 +17,8 @@ jobs:
             flash_size: 8MB
           - target: esp32c3
             flash_size: 4MB
+          - target: esp32s3
+            flash_size: 8MB
     steps:
       - uses: actions/checkout@v4
 
