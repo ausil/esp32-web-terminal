@@ -2,7 +2,7 @@
 
 A web-based serial terminal for single-board computers (Raspberry Pi, BeagleBone, etc.) using an ESP32 as a WiFi-to-UART bridge. Access your SBC's serial console from any browser over your local network — no USB cable or SSH needed.
 
-Supported boards: **ESP32-C6-DevKitC-1** (8MB) and **ESP32-C3 Super Mini** (4MB).
+Supported boards: **ESP32-C6-DevKitC-1** (8MB), **ESP32-C3 Super Mini** (4MB), and **XIAO ESP32S3** (8MB).
 
 ## Features
 
@@ -12,6 +12,8 @@ Supported boards: **ESP32-C6-DevKitC-1** (8MB) and **ESP32-C3 Super Mini** (4MB)
 - **HTTPS + WebSocket** — TLS encrypted using a self-signed ECC P-256 certificate
 - **Authentication** — session-based login with salted SHA-256 password hashing, rate limiting, and automatic lockout
 - **Remote power control** — reset or power-cycle your SBC via GPIO-driven relay/MOSFET
+- **Multi-port serial** — UART and USB CDC-ACM host support (ESP32-S3); switch between ports from the toolbar
+- **USB-to-serial support** — connect to SBCs that expose their console via USB (EspressoBin, etc.) using standard CDC-ACM, CH34x, CP210x, or FTDI adapters (ESP32-S3)
 - **Configurable baud rate** — change serial speed on the fly from the toolbar (9600 to 1,500,000)
 - **OTA firmware update** — upload new firmware from the browser with automatic rollback if the new firmware fails to boot
 - **Device identification** — configurable device name shown in UI, browser tab, DHCP hostname, and mDNS
@@ -31,20 +33,28 @@ Supported boards: **ESP32-C6-DevKitC-1** (8MB) and **ESP32-C3 Super Mini** (4MB)
 |-------|-------|-------|
 | ESP32-C6-DevKitC-1 | 8MB | Primary target, WiFi 6 |
 | ESP32-C3 Super Mini | 4MB | Compact, low-cost option |
+| XIAO ESP32S3 | 8MB | USB Host support for USB-to-serial devices |
 
 ### Pin Assignments
 
 Pins are configured per target at compile time.
 
-| Function | ESP32-C6 | ESP32-C3 | Connect to |
-|----------|----------|----------|------------|
-| UART TX  | GPIO10   | GPIO0    | SBC RX     |
-| UART RX  | GPIO11   | GPIO1    | SBC TX     |
-| SBC Reset | GPIO22  | GPIO6    | Reset pin (active-low, normally high-Z) |
-| SBC Power | GPIO23  | GPIO7    | Relay/MOSFET gate |
-| GND      | GND      | GND      | SBC GND    |
+| Function | ESP32-C6 | ESP32-C3 | ESP32-S3 (XIAO) | Connect to |
+|----------|----------|----------|-----------------|------------|
+| UART TX  | GPIO10   | GPIO0    | GPIO1 (D0)      | SBC RX     |
+| UART RX  | GPIO11   | GPIO1    | GPIO2 (D1)      | SBC TX     |
+| SBC Reset | GPIO22  | GPIO6    | GPIO4 (D3)      | Reset pin (active-low, normally high-Z) |
+| SBC Power | GPIO23  | GPIO7    | GPIO5 (D4)      | Relay/MOSFET gate |
+| USB Host | —        | —        | USB-C            | USB-to-serial device (via OTG adapter) |
+| GND      | GND      | GND      | GND              | SBC GND    |
 
 > **Note:** ESP32 GPIOs are 3.3V. Use a level shifter if your SBC has 5V logic levels. Power control requires an external relay or MOSFET.
+
+#### USB Host on ESP32-S3
+
+The XIAO ESP32S3's USB-C port doubles as a USB Host when used with an OTG adapter. Connect a USB-to-serial adapter (CH340, CP2102, FTDI, or standard CDC-ACM device) to access SBCs that expose their console via USB. The firmware auto-detects the device and supports hot-plug.
+
+Since the USB-C port is shared between programming and USB Host mode, use UART0 (D6/D7) with an external USB-to-serial adapter for initial flashing, or flash via USB-C first and use OTA updates afterward.
 
 ## Getting Started
 
@@ -64,7 +74,7 @@ Pins are configured per target at compile time.
 2. **Set target and build**:
 
    ```bash
-   idf.py set-target esp32c6   # or esp32c3
+   idf.py set-target esp32c6   # or esp32c3 or esp32s3
    idf.py build
    ```
 
@@ -106,7 +116,8 @@ Once logged in, you'll see a full terminal connected to your SBC's serial port. 
 ### Toolbar
 
 - **Device name** — shown at the left
-- **Baud rate** — dropdown to change serial speed (takes effect immediately)
+- **Port** — dropdown to switch between serial ports (shown only on multi-port devices like ESP32-S3)
+- **Baud rate** — dropdown to change serial speed (takes effect immediately, per-port)
 - **Reset SBC** — sends a reset pulse via GPIO
 - **Power** — toggles SBC power via GPIO
 - **Firmware version** — shown in the toolbar
@@ -149,7 +160,7 @@ All API endpoints require authentication via session cookie (obtained from `/api
 | POST   | `/api/power`   | Toggle or set SBC power              | `{"power": true}` or empty for toggle            |
 | POST   | `/api/ota`     | Upload firmware binary               | Raw binary body                                  |
 | GET    | `/api/sysinfo` | System info (chip, heap, uptime)     | —                                                |
-| GET    | `/ws`          | WebSocket for terminal data          | Binary frames                                    |
+| GET    | `/ws`          | WebSocket for terminal data          | Binary frames; `?port=N` to select serial port   |
 
 ### Config Fields
 
@@ -158,6 +169,7 @@ All fields are optional in POST requests; include only what you want to change:
 | Field             | Type    | Description                    |
 |-------------------|---------|--------------------------------|
 | `baud_rate`       | number  | Serial baud rate               |
+| `port`            | number  | Target port index (default 0)  |
 | `sta_ssid`        | string  | WiFi network SSID              |
 | `sta_pass`        | string  | WiFi network password          |
 | `new_password`    | string  | New login password             |
@@ -188,7 +200,9 @@ main/
   config.c/h        NVS persistent configuration
   wifi_manager.c/h  AP + STA WiFi, mDNS, reconnect watchdog
   auth.c/h          Session auth, salted SHA-256, rate limiting
-  uart_bridge.c/h   UART <-> WebSocket bridge
+  serial_port.c/h   Port abstraction (UART + USB CDC-ACM)
+  uart_bridge.c/h   UART backend for serial port layer
+  usb_cdc_bridge.c/h USB Host CDC-ACM backend (ESP32-S3 only)
   web_server.c/h    HTTPS server, REST API, WebSocket, OTA
   gpio_control.c/h  SBC reset and power control
 frontend/

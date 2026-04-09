@@ -10,6 +10,7 @@ Thanks for your interest in contributing! This guide covers how to set up the pr
 - One of the supported boards:
   - ESP32-C6-DevKitC-1 (8MB)
   - ESP32-C3 Super Mini (4MB)
+  - XIAO ESP32S3 (8MB)
 - A Linux or macOS development environment
 
 ### Building
@@ -24,7 +25,7 @@ cd certs && ./generate_cert.sh && cd ..
 Build and flash:
 
 ```bash
-idf.py set-target esp32c6   # or esp32c3
+idf.py set-target esp32c6   # or esp32c3 or esp32s3
 idf.py build
 idf.py -p /dev/ttyUSB0 flash monitor
 ```
@@ -62,7 +63,7 @@ See [CLAUDE.md](CLAUDE.md) for detailed architecture documentation.
 
 - Use ESP-IDF logging macros (`ESP_LOGI`, `ESP_LOGW`, `ESP_LOGE`) instead of `printf`.
 - Avoid enum names that clash with ESP-IDF (prefix with `WIFI_MGR_`, etc.).
-- Pin assignments are target-conditional via `#if CONFIG_IDF_TARGET_ESP32C3` in headers. Support both C6 and C3 when adding new GPIO usage.
+- Pin assignments are target-conditional via `#if CONFIG_IDF_TARGET_ESP32C3` / `CONFIG_IDF_TARGET_ESP32S3` in headers. Support all three targets (C6, C3, S3) when adding new GPIO usage.
 - Be mindful of resource limits:
   - `LWIP_MAX_SOCKETS=16`, `max_open_sockets=4`
   - `httpd stack_size=10240`
@@ -85,11 +86,13 @@ See [CLAUDE.md](CLAUDE.md) for detailed architecture documentation.
 
 1. Fork the repository and create a branch from `main`.
 2. Make your changes, following the guidelines above.
-3. Verify the firmware builds cleanly for both targets:
+3. Verify the firmware builds cleanly for all targets:
    ```bash
    idf.py set-target esp32c6 && idf.py build
    rm sdkconfig && idf.py fullclean
    idf.py set-target esp32c3 && idf.py build
+   rm sdkconfig && idf.py fullclean
+   idf.py set-target esp32s3 && idf.py build
    ```
 4. Open a pull request against `main` with a clear description of what changed and why.
 
@@ -97,7 +100,7 @@ See [CLAUDE.md](CLAUDE.md) for detailed architecture documentation.
 
 Open an issue on GitHub. Include:
 
-- Which board you're using (C6 or C3)
+- Which board you're using (C6, C3, or S3)
 - ESP-IDF version
 - Steps to reproduce
 - Serial monitor output if relevant
