@@ -124,6 +124,8 @@ body {
         <span id="fw-version" style="font-size:11px;color:var(--dim);margin-right:8px"></span>
         <span id="status-dot" class="status-dot"></span>
         <span id="status-text" class="status-text">Disconnected</span>
+        <label id="port-label" for="port-select" style="font-size:13px;display:none">Port:</label>
+        <select id="port-select" style="display:none"></select>
         <label for="baud-select" style="font-size:13px">Baud:</label>
         <select id="baud-select">
             <option value="9600">9600</option>
@@ -266,6 +268,10 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
     var statusDot = document.getElementById("status-dot");
     var statusText = document.getElementById("status-text");
     var baudSelect = document.getElementById("baud-select");
+    var portSelect = document.getElementById("port-select");
+    var portLabel = document.getElementById("port-label");
+    var currentPort = 0;
+    var ports = [];
     var loginOverlay = document.getElementById("login-overlay");
     var loginError = document.getElementById("login-error");
     var settingsOverlay = document.getElementById("settings-overlay");
@@ -346,15 +352,30 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
         if (!sessionToken || !term) return;
 
         var proto = location.protocol === "https:" ? "wss:" : "ws:";
-        ws = new WebSocket(proto + "//" + location.host + "/ws");
+        ws = new WebSocket(proto + "//" + location.host + "/ws?port=" + currentPort);
         ws.binaryType = "arraybuffer";
 
-        ws.onopen = function() { setStatus(true, "Connected"); };
+        ws.onopen = function() {
+            var portName = ports.length > 0 ? ports[currentPort].name : "UART";
+            setStatus(true, "Connected (" + portName + ")");
+        };
         ws.onmessage = function(evt) {
             if (evt.data instanceof ArrayBuffer) {
                 term.write(new Uint8Array(evt.data));
-            } else {
-                term.write(evt.data);
+            } else if (typeof evt.data === "string") {
+                // Text frame: check for JSON events
+                try {
+                    var msg = JSON.parse(evt.data);
+                    if (msg.event === "usb_connected") {
+                        if (term) term.writeln("\r\n[USB device connected]\r\n");
+                        updatePortAvailability(true);
+                    } else if (msg.event === "usb_disconnected") {
+                        if (term) term.writeln("\r\n[USB device disconnected]\r\n");
+                        updatePortAvailability(false);
+                    }
+                } catch(e) {
+                    term.write(evt.data);
+                }
             }
         };
         ws.onclose = function() {
@@ -406,7 +427,15 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
     function loadConfig() {
         api("GET", "/api/config", null, function(err, conf) {
             if (err || !conf) return;
-            if (conf.baud_rate) baudSelect.value = String(conf.baud_rate);
+            if (conf.ports && conf.ports.length > 0) {
+                ports = conf.ports;
+                setupPortSelector(conf.ports);
+                // Set baud for current port
+                var portConf = conf.ports[currentPort];
+                if (portConf) baudSelect.value = String(portConf.baud_rate);
+            } else if (conf.baud_rate) {
+                baudSelect.value = String(conf.baud_rate);
+            }
             updatePowerButton(conf.power_on);
             if (conf.device_name) {
                 document.title = conf.device_name;
@@ -418,6 +447,32 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
         });
     }
 
+    function setupPortSelector(portList) {
+        if (portList.length <= 1) return;
+        portSelect.innerHTML = "";
+        for (var i = 0; i < portList.length; i++) {
+            var opt = document.createElement("option");
+            opt.value = String(portList[i].index);
+            opt.textContent = portList[i].name;
+            if (!portList[i].available && portList[i].type === "usb") {
+                opt.textContent += " (disconnected)";
+            }
+            portSelect.appendChild(opt);
+        }
+        portSelect.value = String(currentPort);
+        portLabel.style.display = "";
+        portSelect.style.display = "";
+    }
+
+    function updatePortAvailability(usbConnected) {
+        for (var i = 0; i < ports.length; i++) {
+            if (ports[i].type === "usb") {
+                ports[i].available = usbConnected;
+            }
+        }
+        if (ports.length > 1) setupPortSelector(ports);
+    }
+
     function updatePowerButton(on) {
         btnPower.textContent = on ? "Power: ON" : "Power: OFF";
         btnPower.classList.toggle("power-on", on);
@@ -426,10 +481,23 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
 
     baudSelect.addEventListener("change", function() {
         var baud = parseInt(baudSelect.value, 10);
-        api("POST", "/api/config", {baud_rate: baud}, function(err, res) {
+        api("POST", "/api/config", {baud_rate: baud, port: currentPort}, function(err, res) {
             if (!err && res && res.ok && term)
                 term.writeln("\r\n[Baud rate changed to " + baud + "]\r\n");
         });
+    });
+
+    portSelect.addEventListener("change", function() {
+        var newPort = parseInt(portSelect.value, 10);
+        if (newPort === currentPort) return;
+        currentPort = newPort;
+        var portName = ports.length > newPort ? ports[newPort].name : "Port " + newPort;
+        if (term) term.writeln("\r\n[Switched to " + portName + "]\r\n");
+        // Update baud dropdown for this port
+        if (ports[newPort]) baudSelect.value = String(ports[newPort].baud_rate);
+        // Reconnect WebSocket to new port
+        if (ws) { ws.onclose = null; ws.close(); }
+        connectWs();
     });
 
     // --- GPIO ---
@@ -884,7 +952,14 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
         if (!err && status === 200 && conf) {
             sessionToken = "cookie";
             loginOverlay.classList.add("hidden");
-            if (conf.baud_rate) baudSelect.value = String(conf.baud_rate);
+            if (conf.ports && conf.ports.length > 0) {
+                ports = conf.ports;
+                setupPortSelector(conf.ports);
+                var portConf = conf.ports[currentPort];
+                if (portConf) baudSelect.value = String(portConf.baud_rate);
+            } else if (conf.baud_rate) {
+                baudSelect.value = String(conf.baud_rate);
+            }
             updatePowerButton(conf.power_on);
             // connectWs will be called once xterm loads
         }

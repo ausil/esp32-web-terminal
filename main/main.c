@@ -4,7 +4,7 @@
 #include "config.h"
 #include "wifi_manager.h"
 #include "auth.h"
-#include "uart_bridge.h"
+#include "serial_port.h"
 #include "web_server.h"
 #include "gpio_control.h"
 #include "esp_log.h"
@@ -22,10 +22,10 @@ static bool s_ntp_synced = false;
 const char *ntp_get_server(void) { return s_ntp_server; }
 bool ntp_is_synced(void) { return s_ntp_synced; }
 
-// UART RX callback: forward data to all WebSocket clients
-static void uart_to_ws_callback(const uint8_t *data, size_t len, void *ctx)
+// Serial RX callback: forward data to WebSocket clients on the same port
+static void serial_to_ws_callback(int port_index, const uint8_t *data, size_t len, void *ctx)
 {
-    web_server_ws_broadcast(data, len);
+    web_server_ws_broadcast(port_index, data, len);
 }
 
 static void ntp_sync_cb(struct timeval *tv)
@@ -99,11 +99,9 @@ void app_main(void)
     // 5. Initialize WiFi
     ESP_ERROR_CHECK(wifi_manager_init());
 
-    // 6. Initialize UART bridge with configured baud rate
-    app_config_t *conf = config_get();
-    ESP_ERROR_CHECK(uart_bridge_init(conf->baud_rate));
-    uart_bridge_set_rx_callback(uart_to_ws_callback, NULL);
-    ESP_ERROR_CHECK(uart_bridge_start());
+    // 6. Initialize serial ports (UART + USB on S3)
+    serial_port_set_rx_callback(serial_to_ws_callback, NULL);
+    ESP_ERROR_CHECK(serial_port_init_all());
 
     // 7. Start HTTPS + WebSocket server
     ESP_ERROR_CHECK(web_server_init());

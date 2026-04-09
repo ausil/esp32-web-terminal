@@ -9,5 +9,8 @@ esp_err_t web_server_init(void);
 esp_err_t web_server_start(void);
 void web_server_stop(void);
 
-// Broadcast data to all connected WebSocket clients (called from UART RX callback)
-void web_server_ws_broadcast(const uint8_t *data, size_t len);
+// Broadcast data to WebSocket clients connected to a specific serial port
+void web_server_ws_broadcast(int port_index, const uint8_t *data, size_t len);
+
+// Broadcast a text message to all WebSocket clients (for status events)
+void web_server_ws_broadcast_text(const char *text);

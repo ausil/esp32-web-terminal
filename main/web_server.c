@@ -4,7 +4,7 @@
 #include "web_server.h"
 #include "auth.h"
 #include "config.h"
-#include "uart_bridge.h"
+#include "serial_port.h"
 #include "gpio_control.h"
 #include "wifi_manager.h"
 #include "ota_github.h"
@@ -107,20 +107,22 @@ static void load_or_save_certs(void)
 typedef struct {
     int fd;
     bool active;
+    int port_index;
 } ws_client_t;
 
 static ws_client_t s_ws_clients[MAX_WS_CLIENTS];
 static SemaphoreHandle_t s_ws_mutex = NULL;
 
-static void ws_add_client(int fd)
+static void ws_add_client(int fd, int port_index)
 {
     xSemaphoreTake(s_ws_mutex, portMAX_DELAY);
     for (int i = 0; i < MAX_WS_CLIENTS; i++) {
         if (!s_ws_clients[i].active) {
             s_ws_clients[i].fd = fd;
             s_ws_clients[i].active = true;
+            s_ws_clients[i].port_index = port_index;
             xSemaphoreGive(s_ws_mutex);
-            ESP_LOGI(TAG, "WS client added: fd=%d slot=%d", fd, i);
+            ESP_LOGI(TAG, "WS client added: fd=%d slot=%d port=%d", fd, i, port_index);
             return;
         }
     }
@@ -140,7 +142,7 @@ static void ws_remove_client(int fd)
     xSemaphoreGive(s_ws_mutex);
 }
 
-void web_server_ws_broadcast(const uint8_t *data, size_t len)
+void web_server_ws_broadcast(int port_index, const uint8_t *data, size_t len)
 {
     if (!s_server) return;
 
@@ -148,6 +150,28 @@ void web_server_ws_broadcast(const uint8_t *data, size_t len)
         .type = HTTPD_WS_TYPE_BINARY,
         .payload = (uint8_t *)data,
         .len = len,
+    };
+
+    xSemaphoreTake(s_ws_mutex, portMAX_DELAY);
+    for (int i = 0; i < MAX_WS_CLIENTS; i++) {
+        if (s_ws_clients[i].active && s_ws_clients[i].port_index == port_index) {
+            esp_err_t err = httpd_ws_send_frame_async(s_server, s_ws_clients[i].fd, &ws_pkt);
+            if (err != ESP_OK) {
+                s_ws_clients[i].active = false;
+            }
+        }
+    }
+    xSemaphoreGive(s_ws_mutex);
+}
+
+void web_server_ws_broadcast_text(const char *text)
+{
+    if (!s_server) return;
+
+    httpd_ws_frame_t ws_pkt = {
+        .type = HTTPD_WS_TYPE_TEXT,
+        .payload = (uint8_t *)text,
+        .len = strlen(text),
     };
 
     xSemaphoreTake(s_ws_mutex, portMAX_DELAY);
@@ -390,7 +414,19 @@ static esp_err_t handle_config_get(httpd_req_t *req)
     gpio_status_t gpio = gpio_get_status();
 
     cJSON *root = cJSON_CreateObject();
-    cJSON_AddNumberToObject(root, "baud_rate", conf->baud_rate);
+    cJSON_AddNumberToObject(root, "baud_rate", conf->baud_rate[0]);
+
+    cJSON *ports = cJSON_AddArrayToObject(root, "ports");
+    for (int i = 0; i < serial_port_count(); i++) {
+        const serial_port_t *sp = serial_port_get(i);
+        cJSON *port = cJSON_CreateObject();
+        cJSON_AddNumberToObject(port, "index", i);
+        cJSON_AddStringToObject(port, "name", sp->name);
+        cJSON_AddStringToObject(port, "type", sp->type == SERIAL_TYPE_UART ? "uart" : "usb");
+        cJSON_AddNumberToObject(port, "baud_rate", conf->baud_rate[i]);
+        cJSON_AddBoolToObject(port, "available", sp->available);
+        cJSON_AddItemToArray(ports, port);
+    }
     cJSON_AddBoolToObject(root, "power_on", gpio.power_on);
     cJSON_AddBoolToObject(root, "power_on_default", conf->power_on_default);
     cJSON_AddStringToObject(root, "ap_ssid", conf->ap_ssid);
@@ -443,8 +479,13 @@ static esp_err_t handle_config_post(httpd_req_t *req)
             if (new_baud == valid_bauds[i]) { valid = true; break; }
         }
         if (valid) {
-            config_set_baud_rate(new_baud);
-            uart_bridge_set_baud_rate(new_baud);
+            int port = 0;
+            const cJSON *port_json = cJSON_GetObjectItem(json, "port");
+            if (cJSON_IsNumber(port_json)) port = (int)port_json->valuedouble;
+            if (port >= 0 && port < serial_port_count()) {
+                config_set_baud_rate_port(port, new_baud);
+                serial_port_set_baud_rate(port, new_baud);
+            }
         }
     }
 
@@ -820,39 +861,50 @@ static esp_err_t handle_ws(httpd_req_t *req)
     if (req->method == HTTP_GET) {
         /* WebSocket handshake — check auth via cookie, header, or query param */
         bool authed = auth_check_request(req);
-        if (!authed) {
-            size_t qlen = httpd_req_get_url_query_len(req);
-            if (qlen > 0) {
-                char *query = malloc(qlen + 1);
-                if (query && httpd_req_get_url_query_str(req, query, qlen + 1) == ESP_OK) {
+        int port_index = 0;
+        size_t qlen = httpd_req_get_url_query_len(req);
+        if (qlen > 0) {
+            char *query = malloc(qlen + 1);
+            if (query && httpd_req_get_url_query_str(req, query, qlen + 1) == ESP_OK) {
+                if (!authed) {
                     char token[128];
                     if (httpd_query_key_value(query, "token", token, sizeof(token)) == ESP_OK) {
                         authed = auth_validate_session(token);
                     }
                 }
-                free(query);
+                char port_str[8];
+                if (httpd_query_key_value(query, "port", port_str, sizeof(port_str)) == ESP_OK) {
+                    int p = atoi(port_str);
+                    if (p >= 0 && p < serial_port_count()) port_index = p;
+                }
             }
+            free(query);
         }
         if (!authed) {
             httpd_resp_set_status(req, "401 Unauthorized");
             return httpd_resp_send(req, NULL, 0);
         }
         int fd = httpd_req_to_sockfd(req);
-        ws_add_client(fd);
-        ESP_LOGI(TAG, "WS client connected: fd=%d", fd);
+        ws_add_client(fd, port_index);
+        ESP_LOGI(TAG, "WS client connected: fd=%d port=%d", fd, port_index);
         return ESP_OK;
     }
 
-    /* Data frame — ensure this client is tracked (in case handshake tracking missed it) */
+    /* Data frame — find this client's port (or late-add as port 0) */
     int fd = httpd_req_to_sockfd(req);
+    int client_port = 0;
     bool found = false;
     xSemaphoreTake(s_ws_mutex, portMAX_DELAY);
     for (int i = 0; i < MAX_WS_CLIENTS; i++) {
-        if (s_ws_clients[i].active && s_ws_clients[i].fd == fd) { found = true; break; }
+        if (s_ws_clients[i].active && s_ws_clients[i].fd == fd) {
+            client_port = s_ws_clients[i].port_index;
+            found = true;
+            break;
+        }
     }
     xSemaphoreGive(s_ws_mutex);
     if (!found) {
-        ws_add_client(fd);
+        ws_add_client(fd, 0);
         ESP_LOGI(TAG, "WS client late-added: fd=%d", fd);
     }
 
@@ -868,7 +920,7 @@ static esp_err_t handle_ws(httpd_req_t *req)
     ret = httpd_ws_recv_frame(req, &ws_pkt, ws_pkt.len);
     if (ret == ESP_OK) {
         if (ws_pkt.type == HTTPD_WS_TYPE_TEXT || ws_pkt.type == HTTPD_WS_TYPE_BINARY) {
-            uart_bridge_send(buf, ws_pkt.len);
+            serial_port_send(client_port, buf, ws_pkt.len);
         } else if (ws_pkt.type == HTTPD_WS_TYPE_CLOSE) {
             ws_remove_client(fd);
         }

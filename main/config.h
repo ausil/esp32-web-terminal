@@ -4,6 +4,7 @@
 #pragma once
 
 #include "esp_err.h"
+#include "serial_port.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -29,7 +30,7 @@ typedef struct {
     char sta_pass[CONFIG_WIFI_PASS_MAX_LEN + 1];
     char ap_ssid[CONFIG_WIFI_SSID_MAX_LEN + 1];
     char ap_pass[CONFIG_WIFI_PASS_MAX_LEN + 1];
-    uint32_t baud_rate;
+    uint32_t baud_rate[SERIAL_PORT_MAX];
     bool power_on_default;  // SBC power state at ESP32 boot
     char auth_user[CONFIG_AUTH_USER_MAX_LEN + 1];
     uint8_t auth_hash[CONFIG_AUTH_HASH_LEN];
@@ -45,7 +46,8 @@ esp_err_t config_init(void);
 app_config_t *config_get(void);
 esp_err_t config_set_wifi_sta(const char *ssid, const char *password);
 esp_err_t config_set_wifi_ap(const char *ssid, const char *password);
-esp_err_t config_set_baud_rate(uint32_t baud_rate);
+esp_err_t config_set_baud_rate(uint32_t baud_rate);  // Port 0 shorthand
+esp_err_t config_set_baud_rate_port(int port_index, uint32_t baud_rate);
 esp_err_t config_set_power_on_default(bool power_on);
 esp_err_t config_set_auth(const char *username, const char *password);
 esp_err_t config_set_device_name(const char *name);

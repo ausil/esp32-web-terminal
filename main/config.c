@@ -150,7 +150,8 @@ esp_err_t config_init(void)
         memset(&s_config, 0, sizeof(s_config));
         strncpy(s_config.ap_ssid, CONFIG_DEFAULT_AP_SSID, sizeof(s_config.ap_ssid) - 1);
         strncpy(s_config.ap_pass, CONFIG_DEFAULT_AP_PASS, sizeof(s_config.ap_pass) - 1);
-        s_config.baud_rate = CONFIG_DEFAULT_BAUD_RATE;
+        for (int i = 0; i < SERIAL_PORT_MAX; i++)
+            s_config.baud_rate[i] = CONFIG_DEFAULT_BAUD_RATE;
         s_config.power_on_default = true;
         s_config.auth_initialized = false;
         strncpy(s_config.device_name, CONFIG_DEFAULT_DEVICE_NAME, sizeof(s_config.device_name) - 1);
@@ -177,10 +178,21 @@ esp_err_t config_init(void)
 
     uint32_t baud = 0;
     if (nvs_get_u32(nvs, "baud_rate", &baud) == ESP_OK) {
-        s_config.baud_rate = baud;
+        s_config.baud_rate[0] = baud;
     } else {
-        s_config.baud_rate = CONFIG_DEFAULT_BAUD_RATE;
+        s_config.baud_rate[0] = CONFIG_DEFAULT_BAUD_RATE;
     }
+#if SERIAL_PORT_MAX > 1
+    for (int i = 1; i < SERIAL_PORT_MAX; i++) {
+        char key[16];
+        snprintf(key, sizeof(key), "baud_rate%d", i);
+        if (nvs_get_u32(nvs, key, &baud) == ESP_OK) {
+            s_config.baud_rate[i] = baud;
+        } else {
+            s_config.baud_rate[i] = CONFIG_DEFAULT_BAUD_RATE;
+        }
+    }
+#endif
 
     uint8_t power_on = 1;
     if (nvs_get_u8(nvs, "power_on", &power_on) == ESP_OK) {
@@ -208,7 +220,7 @@ esp_err_t config_init(void)
     s_config.auth_initialized = (auth_init != 0);
 
     nvs_close(nvs);
-    ESP_LOGI(TAG, "Config loaded: baud=%lu, STA SSID='%s'", s_config.baud_rate, s_config.sta_ssid);
+    ESP_LOGI(TAG, "Config loaded: baud=%lu, STA SSID='%s'", s_config.baud_rate[0], s_config.sta_ssid);
     return ESP_OK;
 }
 
@@ -227,7 +239,14 @@ static esp_err_t save_to_nvs(void)
     nvs_set_str(nvs, "ap_ssid", s_config.ap_ssid);
     nvs_set_str(nvs, "ap_pass", s_config.ap_pass);
     nvs_set_str(nvs, "auth_user", s_config.auth_user);
-    nvs_set_u32(nvs, "baud_rate", s_config.baud_rate);
+    nvs_set_u32(nvs, "baud_rate", s_config.baud_rate[0]);
+#if SERIAL_PORT_MAX > 1
+    for (int i = 1; i < SERIAL_PORT_MAX; i++) {
+        char key[16];
+        snprintf(key, sizeof(key), "baud_rate%d", i);
+        nvs_set_u32(nvs, key, s_config.baud_rate[i]);
+    }
+#endif
     nvs_set_u8(nvs, "power_on", s_config.power_on_default ? 1 : 0);
     nvs_set_blob(nvs, "auth_hash", s_config.auth_hash, CONFIG_AUTH_HASH_LEN);
     nvs_set_blob(nvs, "auth_salt", s_config.auth_salt, CONFIG_AUTH_SALT_LEN);
@@ -264,8 +283,14 @@ esp_err_t config_set_wifi_ap(const char *ssid, const char *password)
 
 esp_err_t config_set_baud_rate(uint32_t baud_rate)
 {
-    s_config.baud_rate = baud_rate;
-    ESP_LOGI(TAG, "Baud rate updated: %lu", baud_rate);
+    return config_set_baud_rate_port(0, baud_rate);
+}
+
+esp_err_t config_set_baud_rate_port(int port_index, uint32_t baud_rate)
+{
+    if (port_index < 0 || port_index >= SERIAL_PORT_MAX) return ESP_ERR_INVALID_ARG;
+    s_config.baud_rate[port_index] = baud_rate;
+    ESP_LOGI(TAG, "Baud rate updated: port=%d, baud=%lu", port_index, baud_rate);
     return save_to_nvs();
 }
 
