@@ -352,7 +352,7 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
         if (!sessionToken || !term) return;
 
         var proto = location.protocol === "https:" ? "wss:" : "ws:";
-        ws = new WebSocket(proto + "//" + location.host + "/ws?port=" + currentPort);
+        ws = new WebSocket(proto + "//" + location.host + "/ws?token=" + encodeURIComponent(sessionToken) + "&port=" + currentPort);
         ws.binaryType = "arraybuffer";
 
         ws.onopen = function() {
@@ -388,7 +388,7 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
     // --- Auth ---
 
     function onLoginSuccess(data) {
-        sessionToken = "cookie";
+        sessionToken = data.token;
         loginOverlay.classList.add("hidden");
         loadConfig();
         // connectWs is called by initTerminal or after xterm loads
@@ -950,7 +950,6 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
     // 1. Check if already authenticated (cookie from previous session)
     api("GET", "/api/config", null, function(err, conf, status) {
         if (!err && status === 200 && conf) {
-            sessionToken = "cookie";
             loginOverlay.classList.add("hidden");
             if (conf.ports && conf.ports.length > 0) {
                 ports = conf.ports;
@@ -961,7 +960,13 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
                 baudSelect.value = String(conf.baud_rate);
             }
             updatePowerButton(conf.power_on);
-            // connectWs will be called once xterm loads
+            // Fetch token for WebSocket auth; connectWs called once xterm loads
+            api("GET", "/api/token", null, function(terr, tdata) {
+                if (!terr && tdata && tdata.token) {
+                    sessionToken = tdata.token;
+                    if (term && !ws) connectWs();
+                }
+            });
         }
     });
 

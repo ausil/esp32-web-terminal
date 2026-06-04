@@ -298,11 +298,11 @@ static esp_err_t handle_login(httpd_req_t *req)
     httpd_resp_set_type(req, "application/json");
 
     app_config_t *conf = config_get();
-    free(token);
-    char resp[64];
+    char resp[192];
     snprintf(resp, sizeof(resp),
-             "{\"ok\":true,\"must_change_password\":%s}",
-             conf->auth_initialized ? "false" : "true");
+             "{\"ok\":true,\"must_change_password\":%s,\"token\":\"%s\"}",
+             conf->auth_initialized ? "false" : "true", token);
+    free(token);
     return httpd_resp_send(req, resp, strlen(resp));
 }
 
@@ -930,6 +930,22 @@ static esp_err_t handle_ws(httpd_req_t *req)
     return ret;
 }
 
+// --- GET /api/token — return session token for WebSocket auth ---
+
+static esp_err_t handle_get_token(httpd_req_t *req)
+{
+    char *token = auth_get_token_from_request(req);
+    if (!token || !auth_validate_session(token)) {
+        free(token);
+        return send_json_error(req, 401, "Unauthorized");
+    }
+    httpd_resp_set_type(req, "application/json");
+    char resp[128];
+    snprintf(resp, sizeof(resp), "{\"token\":\"%s\"}", token);
+    free(token);
+    return httpd_resp_send(req, resp, strlen(resp));
+}
+
 // --- Close callback ---
 
 static void on_close(httpd_handle_t hd, int sockfd)
@@ -979,6 +995,7 @@ esp_err_t web_server_start(void)
     /* API routes */
     const httpd_uri_t route_login = { .uri = "/api/login", .method = HTTP_POST, .handler = handle_login };
     const httpd_uri_t route_logout = { .uri = "/api/logout", .method = HTTP_POST, .handler = handle_logout };
+    const httpd_uri_t route_token = { .uri = "/api/token", .method = HTTP_GET, .handler = handle_get_token };
     const httpd_uri_t route_config_get = { .uri = "/api/config", .method = HTTP_GET, .handler = handle_config_get };
     const httpd_uri_t route_config_post = { .uri = "/api/config", .method = HTTP_POST, .handler = handle_config_post };
     const httpd_uri_t route_reset = { .uri = "/api/reset", .method = HTTP_POST, .handler = handle_reset };
@@ -998,6 +1015,7 @@ esp_err_t web_server_start(void)
     httpd_register_uri_handler(s_server, &route_xterm);
     httpd_register_uri_handler(s_server, &route_login);
     httpd_register_uri_handler(s_server, &route_logout);
+    httpd_register_uri_handler(s_server, &route_token);
     httpd_register_uri_handler(s_server, &route_config_get);
     httpd_register_uri_handler(s_server, &route_config_post);
     httpd_register_uri_handler(s_server, &route_reset);

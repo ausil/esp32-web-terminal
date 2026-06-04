@@ -79,7 +79,7 @@
         if (!sessionToken) return;
 
         var proto = location.protocol === "https:" ? "wss:" : "ws:";
-        ws = new WebSocket(proto + "//" + location.host + "/ws");
+        ws = new WebSocket(proto + "//" + location.host + "/ws?token=" + encodeURIComponent(sessionToken));
         ws.binaryType = "arraybuffer";
 
         ws.onopen = function() { setStatus(true, "Connected"); };
@@ -257,11 +257,15 @@
     // --- Startup: check existing session or show login ---
     apiRequest("GET", "/api/config", null, function(err, conf, status) {
         if (!err && status === 200 && conf) {
-            sessionToken = "cookie";
             loginOverlay.classList.add("hidden");
-            connectWs();
             if (conf.baud_rate) baudSelect.value = String(conf.baud_rate);
             updatePowerButton(conf.power_on);
+            apiRequest("GET", "/api/token", null, function(terr, tdata) {
+                if (!terr && tdata && tdata.token) {
+                    sessionToken = tdata.token;
+                    connectWs();
+                }
+            });
         }
         // else login overlay is already visible
     });
