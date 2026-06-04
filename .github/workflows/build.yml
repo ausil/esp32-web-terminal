@@ -20,7 +20,7 @@ jobs:
           - target: esp32s3
             flash_size: 8MB
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Generate TLS certificates
         run: cd certs && ./generate_cert.sh && cd ..
@@ -36,7 +36,7 @@ jobs:
           cp build/esp32-web-terminal.bin esp32-web-terminal-${{ matrix.target }}.bin
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: firmware-${{ matrix.target }}
           path: esp32-web-terminal-${{ matrix.target }}.bin
@@ -49,7 +49,7 @@ jobs:
       contents: write
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           pattern: firmware-*
           merge-multiple: true
