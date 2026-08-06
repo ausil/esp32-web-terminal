@@ -74,10 +74,17 @@ static void load_or_save_certs(void)
         // Certs exist in NVS — load them
         s_cert_pem = malloc(cert_len);
         s_key_pem = malloc(MAX_CERT_SIZE);
-        if (s_cert_pem && s_key_pem) {
-            nvs_get_blob(nvs, "cert", s_cert_pem, &cert_len);
-            key_len = MAX_CERT_SIZE;
-            nvs_get_blob(nvs, "key", s_key_pem, &key_len);
+        key_len = MAX_CERT_SIZE;
+        if (!s_cert_pem || !s_key_pem ||
+            nvs_get_blob(nvs, "cert", s_cert_pem, &cert_len) != ESP_OK ||
+            nvs_get_blob(nvs, "key", s_key_pem, &key_len) != ESP_OK) {
+            // Incomplete or unreadable — fall back to embedded certs
+            ESP_LOGW(TAG, "TLS certs in NVS unreadable, using embedded certs");
+            free(s_cert_pem);
+            free(s_key_pem);
+            s_cert_pem = NULL;
+            s_key_pem = NULL;
+        } else {
             ESP_LOGI(TAG, "TLS certs loaded from NVS (cert=%d key=%d bytes)", cert_len, key_len);
         }
     } else {
@@ -198,6 +205,7 @@ static esp_err_t send_json_error(httpd_req_t *req, int status, const char *messa
 {
     httpd_resp_set_status(req, status == 401 ? "401 Unauthorized" :
                                 status == 429 ? "429 Too Many Requests" :
+                                status == 500 ? "500 Internal Server Error" :
                                 "400 Bad Request");
     httpd_resp_set_type(req, "application/json");
     set_cors_headers(req);
@@ -492,9 +500,11 @@ static esp_err_t handle_config_post(httpd_req_t *req)
     const cJSON *ap_ssid = cJSON_GetObjectItem(json, "ap_ssid");
     const cJSON *ap_pass = cJSON_GetObjectItem(json, "ap_pass");
     if (cJSON_IsString(ap_ssid) && cJSON_IsString(ap_pass)) {
-        if (strlen(ap_ssid->valuestring) == 0 || strlen(ap_ssid->valuestring) > 32) {
+        /* 27-char limit: a "-XXXX" MAC suffix is appended and the result must
+         * fit the 32-byte WiFi SSID limit */
+        if (strlen(ap_ssid->valuestring) == 0 || strlen(ap_ssid->valuestring) > 27) {
             cJSON_Delete(json);
-            return send_json_error(req, 400, "AP SSID must be 1-32 characters");
+            return send_json_error(req, 400, "AP SSID must be 1-27 characters");
         }
         if (strlen(ap_pass->valuestring) > 0 && strlen(ap_pass->valuestring) < 8) {
             cJSON_Delete(json);
@@ -630,16 +640,20 @@ static esp_err_t handle_ota(httpd_req_t *req)
 
     char buf[4096];
     int total_read = 0;
+    int timeouts = 0;
     bool failed = false;
 
     while (total_read < req->content_len) {
         int read_len = httpd_req_recv(req, buf, sizeof(buf));
         if (read_len <= 0) {
-            if (read_len == HTTPD_SOCK_ERR_TIMEOUT) continue;
+            /* Cap timeout retries: the httpd is single-threaded, so a stalled
+             * client would otherwise hang the whole server indefinitely */
+            if (read_len == HTTPD_SOCK_ERR_TIMEOUT && ++timeouts < 5) continue;
             ESP_LOGE(TAG, "OTA recv error at %d/%d", total_read, req->content_len);
             failed = true;
             break;
         }
+        timeouts = 0;
 
         err = esp_ota_write(ota_handle, buf, read_len);
         if (err != ESP_OK) {
@@ -912,6 +926,11 @@ static esp_err_t handle_ws(httpd_req_t *req)
 
     esp_err_t ret = httpd_ws_recv_frame(req, &ws_pkt, 0);
     if (ret != ESP_OK || ws_pkt.len == 0) return ret;
+    if (ws_pkt.len > 8192) {
+        ESP_LOGW(TAG, "WS frame too large (%d bytes), closing fd=%d", (int)ws_pkt.len, fd);
+        ws_remove_client(fd);
+        return ESP_FAIL;
+    }
 
     uint8_t *buf = malloc(ws_pkt.len);
     if (!buf) return ESP_ERR_NO_MEM;

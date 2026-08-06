@@ -35,6 +35,18 @@ static esp_err_t start_ap(const char *ssid, const char *password);
 static void sanitize_hostname(const char *name, char *out, size_t out_len);
 static void reconnect_timer_cb(TimerHandle_t timer);
 
+// Build "<base>-XXXX" AP SSID with MAC suffix, truncating the base so the
+// result never exceeds the 32-byte WiFi SSID limit
+static void build_ap_ssid(const char *base, char *out, size_t out_len)
+{
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
+    char truncated[28];  // 32 - strlen("-XXXX")
+    strncpy(truncated, base, sizeof(truncated) - 1);
+    truncated[sizeof(truncated) - 1] = '\0';
+    snprintf(out, out_len, "%s-%02X%02X", truncated, mac[4], mac[5]);
+}
+
 static void event_handler(void *arg, esp_event_base_t event_base,
                           int32_t event_id, void *event_data)
 {
@@ -64,10 +76,8 @@ static void event_handler(void *arg, esp_event_base_t event_base,
                 s_status.mode = WIFI_MGR_MODE_AP_STA;
 
                 app_config_t *conf = config_get();
-                uint8_t mac[6];
-                esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
-                char ap_ssid[40];
-                snprintf(ap_ssid, sizeof(ap_ssid), "%s-%02X%02X", conf->ap_ssid, mac[4], mac[5]);
+                char ap_ssid[33];
+                build_ap_ssid(conf->ap_ssid, ap_ssid, sizeof(ap_ssid));
                 start_ap(ap_ssid, conf->ap_pass);
             }
 
@@ -227,10 +237,8 @@ esp_err_t wifi_manager_init(void)
                                       pdTRUE, NULL, reconnect_timer_cb);
 
     // Append MAC suffix to AP SSID for uniqueness
-    uint8_t mac[6];
-    esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
-    char ap_ssid[40];
-    snprintf(ap_ssid, sizeof(ap_ssid), "%s-%02X%02X", conf->ap_ssid, mac[4], mac[5]);
+    char ap_ssid[33];
+    build_ap_ssid(conf->ap_ssid, ap_ssid, sizeof(ap_ssid));
 
     bool has_sta_config = strlen(conf->sta_ssid) > 0;
 
@@ -282,10 +290,8 @@ esp_err_t wifi_manager_connect_sta(const char *ssid, const char *password)
         s_status.mode = WIFI_MGR_MODE_AP_STA;
 
         app_config_t *conf = config_get();
-        uint8_t mac[6];
-        esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
-        char ap_ssid[40];
-        snprintf(ap_ssid, sizeof(ap_ssid), "%s-%02X%02X", conf->ap_ssid, mac[4], mac[5]);
+        char ap_ssid[33];
+        build_ap_ssid(conf->ap_ssid, ap_ssid, sizeof(ap_ssid));
         start_ap(ap_ssid, conf->ap_pass);
     }
 
@@ -323,10 +329,8 @@ esp_err_t wifi_manager_disconnect_sta(void)
     memset(s_status.sta_ip, 0, sizeof(s_status.sta_ip));
 
     app_config_t *conf = config_get();
-    uint8_t mac[6];
-    esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
-    char ap_ssid[40];
-    snprintf(ap_ssid, sizeof(ap_ssid), "%s-%02X%02X", conf->ap_ssid, mac[4], mac[5]);
+    char ap_ssid[33];
+    build_ap_ssid(conf->ap_ssid, ap_ssid, sizeof(ap_ssid));
     start_ap(ap_ssid, conf->ap_pass);
     ESP_ERROR_CHECK(esp_wifi_start());
 
@@ -343,10 +347,8 @@ esp_err_t wifi_manager_update_ap(const char *ssid, const char *password)
     }
 
     // Rebuild AP SSID with MAC suffix
-    uint8_t mac[6];
-    esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
-    char ap_ssid[40];
-    snprintf(ap_ssid, sizeof(ap_ssid), "%s-%02X%02X", ssid, mac[4], mac[5]);
+    char ap_ssid[33];
+    build_ap_ssid(ssid, ap_ssid, sizeof(ap_ssid));
 
     // Reconfigure the running AP
     return start_ap(ap_ssid, password);
@@ -406,7 +408,7 @@ int wifi_manager_scan(wifi_scan_result_t **results)
     uint16_t ap_count = 0;
     esp_wifi_scan_get_ap_num(&ap_count);
     if (ap_count == 0) {
-        esp_wifi_scan_get_ap_records(&ap_count, NULL);  // clear scan results
+        esp_wifi_clear_ap_list();
         if (switched) esp_wifi_set_mode(orig_mode);
         if (strlen(config_get()->sta_ssid) > 0) {
             s_scanning = false;
@@ -422,8 +424,10 @@ int wifi_manager_scan(wifi_scan_result_t **results)
 
     wifi_ap_record_t *ap_records = malloc(sizeof(wifi_ap_record_t) * ap_count);
     if (!ap_records) {
-        esp_wifi_scan_get_ap_records(&ap_count, NULL);
+        esp_wifi_clear_ap_list();
         if (switched) esp_wifi_set_mode(orig_mode);
+        s_scanning = false;
+        if (strlen(config_get()->sta_ssid) > 0) esp_wifi_connect();
         return -1;
     }
 
@@ -434,6 +438,8 @@ int wifi_manager_scan(wifi_scan_result_t **results)
     if (!res) {
         free(ap_records);
         if (switched) esp_wifi_set_mode(orig_mode);
+        s_scanning = false;
+        if (strlen(config_get()->sta_ssid) > 0) esp_wifi_connect();
         return -1;
     }
 

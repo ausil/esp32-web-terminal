@@ -14,7 +14,7 @@
 static const char *TAG = "ota_github";
 
 #define GITHUB_API_URL "https://api.github.com/repos/ausil/esp32-web-terminal/releases/latest"
-#define RESPONSE_BUFFER_SIZE 8192
+#define RESPONSE_BUFFER_SIZE 16384
 
 // Returns >0 if a > b, 0 if equal, <0 if a < b
 static int semver_compare(const char *a, const char *b)
@@ -78,6 +78,11 @@ esp_err_t ota_github_check(ota_github_check_result_t *result)
         total_read += read_len;
     }
     buffer[total_read] = '\0';
+
+    if (content_length > RESPONSE_BUFFER_SIZE - 1) {
+        ESP_LOGW(TAG, "GitHub API response truncated (%d > %d bytes), parse may fail",
+                 content_length, RESPONSE_BUFFER_SIZE - 1);
+    }
 
     esp_http_client_close(client);
     esp_http_client_cleanup(client);

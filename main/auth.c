@@ -5,11 +5,20 @@
 #include "config.h"
 #include "esp_log.h"
 #include "esp_random.h"
+#include "esp_timer.h"
 #include <string.h>
 #include <stdlib.h>
 #include <time.h>
 
 static const char *TAG = "auth";
+
+// Monotonic seconds since boot. Session/lockout timing must not use wall-clock
+// time(): the first NTP sync jumps the clock decades forward, which would
+// instantly expire every session created before the sync.
+static time_t mono_now(void)
+{
+    return (time_t)(esp_timer_get_time() / 1000000);
+}
 
 typedef struct {
     char token[AUTH_SESSION_TOKEN_LEN * 2 + 1]; // hex string
@@ -43,8 +52,7 @@ static void generate_token(char *buf, size_t buf_len)
 bool auth_is_locked_out(void)
 {
     if (s_lockout_until == 0) return false;
-    time_t now;
-    time(&now);
+    time_t now = mono_now();
     if (now >= s_lockout_until) {
         s_lockout_until = 0;
         s_failed_attempts = 0;
@@ -66,9 +74,7 @@ char *auth_login(const char *username, const char *password)
         s_failed_attempts++;
         ESP_LOGW(TAG, "Login failed for user '%s' (attempt %d/%d)", username, s_failed_attempts, AUTH_MAX_FAILED);
         if (s_failed_attempts >= AUTH_MAX_FAILED) {
-            time_t now;
-            time(&now);
-            s_lockout_until = now + AUTH_LOCKOUT_S;
+            s_lockout_until = mono_now() + AUTH_LOCKOUT_S;
             ESP_LOGW(TAG, "Account locked out for %d seconds", AUTH_LOCKOUT_S);
         }
         return NULL;
@@ -81,8 +87,7 @@ char *auth_login(const char *username, const char *password)
     int slot = -1;
     time_t oldest_time = 0;
     int oldest_slot = 0;
-    time_t now;
-    time(&now);
+    time_t now = mono_now();
 
     for (int i = 0; i < AUTH_MAX_SESSIONS; i++) {
         // Expire old sessions
@@ -116,8 +121,7 @@ bool auth_validate_session(const char *token)
 {
     if (!token || strlen(token) == 0) return false;
 
-    time_t now;
-    time(&now);
+    time_t now = mono_now();
 
     for (int i = 0; i < AUTH_MAX_SESSIONS; i++) {
         if (s_sessions[i].active && strcmp(s_sessions[i].token, token) == 0) {
