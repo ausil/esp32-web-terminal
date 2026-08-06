@@ -30,16 +30,20 @@ jobs:
         with:
           esp_idf_version: v6.0
           target: ${{ matrix.target }}
+          command: idf.py build merge-bin -o factory.bin
 
       - name: Rename artifacts
         run: |
           cp build/esp32-web-terminal.bin esp32-web-terminal-${{ matrix.target }}.bin
+          cp build/factory.bin esp32-web-terminal-${{ matrix.target }}-factory.bin
 
       - name: Upload artifact
         uses: actions/upload-artifact@v6
         with:
           name: firmware-${{ matrix.target }}
-          path: esp32-web-terminal-${{ matrix.target }}.bin
+          path: |
+            esp32-web-terminal-${{ matrix.target }}.bin
+            esp32-web-terminal-${{ matrix.target }}-factory.bin
 
   release:
     needs: build

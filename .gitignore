@@ -7,3 +7,4 @@ certs/server.crt
 certs/server.key
 hardware/
 *.bin
+__pycache__/

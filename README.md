@@ -89,6 +89,25 @@ Since the USB-C port is shared between programming and USB Host mode, use UART0 
 > rm sdkconfig && idf.py fullclean && idf.py set-target esp32c6 && idf.py build
 > ```
 
+### Flash Without Building (Factory Images)
+
+Each [release](https://github.com/ausil/esp32-web-terminal/releases) publishes a
+`esp32-web-terminal-<target>-factory.bin` containing the bootloader, partition
+table, and firmware. `tools/factory_flash.py` downloads and flashes it in one
+step — no ESP-IDF install needed, just `pip install esptool`:
+
+```bash
+tools/factory_flash.py -p /dev/ttyUSB0            # latest release, chip auto-detected
+tools/factory_flash.py -p /dev/ttyUSB0 --release v1.5.0
+tools/factory_flash.py -p /dev/ttyUSB0 --local    # flash your own idf.py build
+```
+
+The device boots unconfigured and goes through the normal first-time setup
+below. Optionally, `--config seed.json` pre-seeds settings (device name, WiFi,
+admin password, timezone, baud) into NVS so the device comes up ready to use —
+run `tools/factory_flash.py --help` and see the script header for the format
+(requires `pip install esp-idf-nvs-partition-gen`).
+
 ### First-Time Setup
 
 1. Connect to the ESP32's WiFi access point:

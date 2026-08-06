@@ -51,6 +51,10 @@ frontend/
   style.css         - Dark theme styling (reference copy)
 certs/
   generate_cert.sh  - Generates self-signed ECC P-256 cert for TLS
+tools/
+  factory_flash.py  - Standalone factory flasher: downloads release factory image
+                      (bootloader+partitions+app, merged via idf.py merge-bin in CI),
+                      flashes at 0x0; optional --config pre-seeds NVS (webterm namespace)
 ```
 
 ## Key APIs
