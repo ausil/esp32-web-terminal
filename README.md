@@ -91,10 +91,11 @@ Since the USB-C port is shared between programming and USB Host mode, use UART0 
 
 ### Flash Without Building (Factory Images)
 
-Each [release](https://github.com/ausil/esp32-web-terminal/releases) publishes a
-`esp32-web-terminal-<target>-factory.bin` containing the bootloader, partition
-table, and firmware. `tools/factory_flash.py` downloads and flashes it in one
-step — no ESP-IDF install needed, just `pip install esptool`:
+Each [release](https://github.com/ausil/esp32-web-terminal/releases) has a
+companion `vX.Y.Z-factory` prerelease with `esp32-web-terminal-<target>-factory.bin`
+images containing the bootloader, partition table, and firmware.
+`tools/factory_flash.py` downloads and flashes one in a single step — no
+ESP-IDF install needed, just `pip install esptool`:
 
 ```bash
 tools/factory_flash.py -p /dev/ttyUSB0            # latest release, chip auto-detected

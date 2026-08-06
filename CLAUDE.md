@@ -52,9 +52,10 @@ frontend/
 certs/
   generate_cert.sh  - Generates self-signed ECC P-256 cert for TLS
 tools/
-  factory_flash.py  - Standalone factory flasher: downloads release factory image
-                      (bootloader+partitions+app, merged via idf.py merge-bin in CI),
-                      flashes at 0x0; optional --config pre-seeds NVS (webterm namespace)
+  factory_flash.py  - Standalone factory flasher: downloads factory image from the
+                      vX.Y.Z-factory companion prerelease (bootloader+partitions+app,
+                      merged via idf.py merge-bin in CI), flashes at 0x0; optional
+                      --config pre-seeds NVS (webterm namespace)
 ```
 
 ## Key APIs
@@ -106,6 +107,7 @@ Pins are target-conditional (`#if CONFIG_IDF_TARGET_ESP32C3` in headers).
 - USB CDC-ACM: supports standard CDC, CH34x, CP210x, FTDI via VCP drivers; hot-plug with frontend notifications
 - Task watchdog: 10s timeout, panic (reboot) on hang
 - OTA rollback: firmware marked valid at end of app_main after all subsystems init
+- GitHub releases: keep the main release at 3 assets (app bins only) — firmware ≤1.4.2 fetches releases/latest with an 8KB buffer and each asset adds ~1.75KB of JSON; factory images go in the vX.Y.Z-factory companion prerelease
 - NTP: DHCP server discovery with pool.ntp.org fallback, optional manual override
 - Timezone: POSIX TZ string stored in NVS, applied via setenv("TZ")/tzset()
 - CORS: API responses set Access-Control-Allow-Origin: null and X-Content-Type-Options: nosniff

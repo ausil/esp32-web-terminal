@@ -45,6 +45,7 @@ import secrets
 import subprocess
 import sys
 import tempfile
+import urllib.error
 import urllib.request
 
 GITHUB_REPO = "ausil/esp32-web-terminal"
@@ -115,12 +116,25 @@ def github_get(url):
 
 
 def download_factory_image(target, release_tag, dest_dir):
-    if release_tag:
-        url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/tags/{release_tag}"
-    else:
-        url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+    api = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
+    if not release_tag:
+        print(f"Fetching release info from {api}/latest")
+        release_tag = github_get(f"{api}/latest").get("tag_name")
+        if not release_tag:
+            die("could not determine the latest release tag")
+    # Factory images live in a companion "<tag>-factory" prerelease so the
+    # main release stays small enough for the firmware's OTA update check
+    if not release_tag.endswith("-factory"):
+        release_tag += "-factory"
+    url = f"{api}/tags/{release_tag}"
     print(f"Fetching release info from {url}")
-    release = github_get(url)
+    try:
+        release = github_get(url)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            die(f"no factory release {release_tag} found — "
+                f"factory images are published for releases v1.5.0 and later")
+        raise
     tag = release.get("tag_name", "?")
 
     asset_name = f"esp32-web-terminal-{target}-factory.bin"

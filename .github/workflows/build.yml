@@ -3,7 +3,7 @@ name: Build
 on:
   push:
     branches: [main]
-    tags: ['v*']
+    tags: ['v*', '!v*-factory']
   pull_request:
     branches: [main]
 
@@ -58,8 +58,28 @@ jobs:
           pattern: firmware-*
           merge-multiple: true
 
+      # Firmware ≤1.4.2 fetches releases/latest with an 8KB buffer, and each
+      # release asset adds ~1.75KB of JSON — keep the main release at 3 assets
+      # (app bins only) and publish factory images as a companion prerelease,
+      # which releases/latest excludes.
       - name: Create release
         uses: softprops/action-gh-release@v3
         with:
-          files: '*.bin'
+          files: |
+            esp32-web-terminal-esp32c3.bin
+            esp32-web-terminal-esp32c6.bin
+            esp32-web-terminal-esp32s3.bin
           generate_release_notes: true
+
+      - name: Create factory images release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}-factory
+          name: Factory images ${{ github.ref_name }}
+          prerelease: true
+          files: '*-factory.bin'
+          body: >
+            Merged factory images (bootloader + partition table + firmware,
+            flash at 0x0) for ${{ github.ref_name }}. Use tools/factory_flash.py,
+            or esptool directly. For OTA updates use the
+            ${{ github.ref_name }} release instead.

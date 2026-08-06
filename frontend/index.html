@@ -799,7 +799,10 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
             btn.textContent = "Check for Updates";
             try {
                 var res = JSON.parse(xhr.responseText);
-                if (res.update_available) {
+                if (xhr.status !== 200 || res.error) {
+                    info.textContent = "Check failed: " + (res.error || "HTTP " + xhr.status);
+                    info.style.color = "var(--danger)";
+                } else if (res.update_available) {
                     info.textContent = "Update available: v" + res.latest_version + " (current: v" + res.current_version + ")";
                     info.style.color = "var(--accent)";
                     installBtn.style.display = "";
