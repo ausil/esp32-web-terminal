@@ -54,6 +54,12 @@ static void event_handler(void *arg, esp_event_base_t event_base,
         if (!s_scanning) {
             esp_wifi_connect();
         }
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_CONNECTED) {
+        // Netif is up now; generate an IPv6 link-local address (SLAAC/RA
+        // will add further addresses once this exists)
+        esp_netif_create_ip6_linklocal(s_sta_netif);
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_START) {
+        esp_netif_create_ip6_linklocal(s_ap_netif);
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         if (s_scanning) {
             ESP_LOGI(TAG, "STA disconnect during scan, ignoring");
@@ -107,6 +113,10 @@ static void event_handler(void *arg, esp_event_base_t event_base,
             s_status.mode = WIFI_MGR_MODE_STA;
             memset(s_status.ap_ip, 0, sizeof(s_status.ap_ip));
         }
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_GOT_IP6) {
+        ip_event_got_ip6_t *event = (ip_event_got_ip6_t *)event_data;
+        ESP_LOGI(TAG, "Got IPv6 address on %s: " IPV6STR,
+                 esp_netif_get_desc(event->esp_netif), IPV62STR(event->ip6_info.ip));
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STACONNECTED) {
         wifi_event_ap_staconnected_t *event = (wifi_event_ap_staconnected_t *)event_data;
         ESP_LOGI(TAG, "AP: station " MACSTR " connected", MAC2STR(event->mac));
@@ -222,6 +232,8 @@ esp_err_t wifi_manager_init(void)
     ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
                                                          &event_handler, NULL, NULL));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                                                         &event_handler, NULL, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_GOT_IP6,
                                                          &event_handler, NULL, NULL));
 
     app_config_t *conf = config_get();
@@ -357,6 +369,29 @@ esp_err_t wifi_manager_update_ap(const char *ssid, const char *password)
 wifi_manager_status_t wifi_manager_get_status(void)
 {
     return s_status;
+}
+
+static int get_ip6_list(esp_netif_t *netif, char addrs[][48], int max)
+{
+    if (!netif || max <= 0) return 0;
+    esp_ip6_addr_t ip6[WIFI_MGR_MAX_IP6];
+    int n = esp_netif_get_all_ip6(netif, ip6);
+    if (n > max) n = max;
+    if (n > WIFI_MGR_MAX_IP6) n = WIFI_MGR_MAX_IP6;
+    for (int i = 0; i < n; i++) {
+        snprintf(addrs[i], 48, IPV6STR, IPV62STR(ip6[i]));
+    }
+    return n;
+}
+
+int wifi_manager_get_sta_ip6(char addrs[][48], int max)
+{
+    return get_ip6_list(s_sta_netif, addrs, max);
+}
+
+int wifi_manager_get_ap_ip6(char addrs[][48], int max)
+{
+    return get_ip6_list(s_ap_netif, addrs, max);
 }
 
 int wifi_manager_scan(wifi_scan_result_t **results)

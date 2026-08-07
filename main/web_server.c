@@ -442,6 +442,18 @@ static esp_err_t handle_config_get(httpd_req_t *req)
     cJSON_AddBoolToObject(root, "sta_connected", wifi.sta_connected);
     cJSON_AddStringToObject(root, "sta_ip", wifi.sta_ip);
     cJSON_AddStringToObject(root, "ap_ip", wifi.ap_ip);
+
+    char ip6addrs[WIFI_MGR_MAX_IP6][48];
+    cJSON *sta_ip6 = cJSON_AddArrayToObject(root, "sta_ip6");
+    int n = wifi_manager_get_sta_ip6(ip6addrs, WIFI_MGR_MAX_IP6);
+    for (int i = 0; i < n; i++) {
+        cJSON_AddItemToArray(sta_ip6, cJSON_CreateString(ip6addrs[i]));
+    }
+    cJSON *ap_ip6 = cJSON_AddArrayToObject(root, "ap_ip6");
+    n = wifi_manager_get_ap_ip6(ip6addrs, WIFI_MGR_MAX_IP6);
+    for (int i = 0; i < n; i++) {
+        cJSON_AddItemToArray(ap_ip6, cJSON_CreateString(ip6addrs[i]));
+    }
     cJSON_AddStringToObject(root, "wifi_mode",
                             wifi.mode == WIFI_MGR_MODE_AP ? "ap" :
                             wifi.mode == WIFI_MGR_MODE_STA ? "sta" : "ap+sta");
