@@ -120,7 +120,7 @@ typedef struct {
 static ws_client_t s_ws_clients[MAX_WS_CLIENTS];
 static SemaphoreHandle_t s_ws_mutex = NULL;
 
-static void ws_add_client(int fd, int port_index)
+static bool ws_add_client(int fd, int port_index)
 {
     xSemaphoreTake(s_ws_mutex, portMAX_DELAY);
     for (int i = 0; i < MAX_WS_CLIENTS; i++) {
@@ -130,11 +130,12 @@ static void ws_add_client(int fd, int port_index)
             s_ws_clients[i].port_index = port_index;
             xSemaphoreGive(s_ws_mutex);
             ESP_LOGI(TAG, "WS client added: fd=%d slot=%d port=%d", fd, i, port_index);
-            return;
+            return true;
         }
     }
     xSemaphoreGive(s_ws_mutex);
     ESP_LOGW(TAG, "WS client slots full, rejecting fd=%d", fd);
+    return false;
 }
 
 static void ws_remove_client(int fd)
@@ -906,17 +907,22 @@ static esp_err_t handle_ws(httpd_req_t *req)
             }
             free(query);
         }
-        if (!authed) {
-            httpd_resp_set_status(req, "401 Unauthorized");
-            return httpd_resp_send(req, NULL, 0);
-        }
+        /* httpd has already completed the 101 upgrade before calling us, so a
+         * 401 body would just be stray bytes on a live socket. Returning an
+         * error makes httpd close the session instead. */
         int fd = httpd_req_to_sockfd(req);
-        ws_add_client(fd, port_index);
+        if (!authed) {
+            ESP_LOGW(TAG, "WS handshake rejected (unauthenticated): fd=%d", fd);
+            return ESP_FAIL;
+        }
+        if (!ws_add_client(fd, port_index)) {
+            return ESP_FAIL;
+        }
         ESP_LOGI(TAG, "WS client connected: fd=%d port=%d", fd, port_index);
         return ESP_OK;
     }
 
-    /* Data frame — find this client's port (or late-add as port 0) */
+    /* Data frame — only fds registered at an authenticated handshake may talk */
     int fd = httpd_req_to_sockfd(req);
     int client_port = 0;
     bool found = false;
@@ -930,8 +936,8 @@ static esp_err_t handle_ws(httpd_req_t *req)
     }
     xSemaphoreGive(s_ws_mutex);
     if (!found) {
-        ws_add_client(fd, 0);
-        ESP_LOGI(TAG, "WS client late-added: fd=%d", fd);
+        ESP_LOGW(TAG, "WS frame from unregistered fd=%d, closing", fd);
+        return ESP_FAIL;
     }
 
     httpd_ws_frame_t ws_pkt = { .type = HTTPD_WS_TYPE_BINARY };
