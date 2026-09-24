@@ -205,6 +205,7 @@ static void set_cors_headers(httpd_req_t *req)
 static esp_err_t send_json_error(httpd_req_t *req, int status, const char *message)
 {
     httpd_resp_set_status(req, status == 401 ? "401 Unauthorized" :
+                                status == 403 ? "403 Forbidden" :
                                 status == 429 ? "429 Too Many Requests" :
                                 status == 500 ? "500 Internal Server Error" :
                                 "400 Bad Request");
@@ -222,6 +223,35 @@ static bool require_auth(httpd_req_t *req)
         return false;
     }
     return true;
+}
+
+/* --- Setup mode (default credentials still in place) ---
+ *
+ * admin/admin is published in the README and the AP passphrase is fixed, so a
+ * device that has never had its password changed is effectively open to anyone
+ * who can reach it. Until that happens, refuse everything that can change
+ * state, touch the radio/GPIO/OTA, or reach the serial console. GET /api/config
+ * and /api/sysinfo stay open so the UI can render and report auth_initialized
+ * — the frontend uses that flag to tell the user why the terminal is locked. */
+#define SETUP_LOCKED_MSG "Change the default password in Settings before using this"
+#define MIN_PASSWORD_LEN 8  /* matches the AP password minimum */
+
+static bool require_password_changed(httpd_req_t *req)
+{
+    if (config_get()->auth_initialized) return true;
+    send_json_error(req, 403, SETUP_LOCKED_MSG);
+    return false;
+}
+
+/* POST /api/config is the only way to change the password, so in setup mode it
+ * has to stay reachable — but only for the credential change itself, otherwise
+ * the lock could be bypassed by bundling another field into the same request. */
+static bool is_credential_key(const char *key)
+{
+    if (!key) return false;
+    return strcmp(key, "new_password") == 0 ||
+           strcmp(key, "current_password") == 0 ||
+           strcmp(key, "username") == 0;
 }
 
 // --- Static file handlers ---
@@ -384,6 +414,7 @@ static esp_err_t handle_sysinfo(httpd_req_t *req)
 static esp_err_t handle_wifi_scan(httpd_req_t *req)
 {
     if (!require_auth(req)) return ESP_OK;
+    if (!require_password_changed(req)) return ESP_OK;
 
     wifi_scan_result_t *results = NULL;
     int count = wifi_manager_scan(&results);
@@ -477,6 +508,9 @@ static esp_err_t handle_config_get(httpd_req_t *req)
 
 static esp_err_t handle_config_post(httpd_req_t *req)
 {
+    /* No blanket require_password_changed() here: this endpoint is how the
+     * password gets changed. The setup-mode field allowlist below is what
+     * keeps it from being used to mutate anything else. */
     if (!require_auth(req)) return ESP_OK;
 
     if (req->content_len == 0 || req->content_len >= 512) {
@@ -490,6 +524,27 @@ static esp_err_t handle_config_post(httpd_req_t *req)
 
     cJSON *json = cJSON_Parse(buf);
     if (!json) return send_json_error(req, 400, "Invalid JSON");
+
+    /* Setup mode: accept the credential change and nothing else, so the one
+     * unlocked endpoint can't be used to rewrite STA credentials (which would
+     * quietly relocate the device) or flip any other setting. The request must
+     * actually carry a new password — an empty or credential-free body is just
+     * an attempt to get a free {"ok":true} out of us. */
+    if (!config_get()->auth_initialized) {
+        const cJSON *item = NULL;
+        bool has_new_pass = false;
+        cJSON_ArrayForEach(item, json) {
+            if (item->string && strcmp(item->string, "new_password") == 0) has_new_pass = true;
+            if (!is_credential_key(item->string)) {
+                cJSON_Delete(json);
+                return send_json_error(req, 403, SETUP_LOCKED_MSG);
+            }
+        }
+        if (!has_new_pass) {
+            cJSON_Delete(json);
+            return send_json_error(req, 403, SETUP_LOCKED_MSG);
+        }
+    }
 
     const cJSON *baud = cJSON_GetObjectItem(json, "baud_rate");
     if (cJSON_IsNumber(baud)) {
@@ -562,14 +617,33 @@ static esp_err_t handle_config_post(httpd_req_t *req)
 
     const cJSON *new_pass = cJSON_GetObjectItem(json, "new_password");
     if (cJSON_IsString(new_pass)) {
+        /* Checked before the current-password hash so a rejected request doesn't
+         * pay for 10k PBKDF2 rounds, and so the limit can't be bypassed by a
+         * client that skips the frontend's own check. */
+        if (strlen(new_pass->valuestring) < MIN_PASSWORD_LEN) {
+            cJSON_Delete(json);
+            return send_json_error(req, 400, "New password must be 8+ characters");
+        }
+
         const cJSON *cur_pass = cJSON_GetObjectItem(json, "current_password");
         if (!cJSON_IsString(cur_pass) || !config_check_password(cur_pass->valuestring)) {
             cJSON_Delete(json);
             return send_json_error(req, 401, "Current password required");
         }
+
         const char *user = config_get()->auth_user;
         const cJSON *new_user = cJSON_GetObjectItem(json, "username");
-        if (cJSON_IsString(new_user)) user = new_user->valuestring;
+        if (cJSON_IsString(new_user)) {
+            /* Rejected rather than strncpy-truncated: a silently clipped or
+             * empty username would leave a login name the user can't type. */
+            size_t ulen = strlen(new_user->valuestring);
+            if (ulen == 0 || ulen > CONFIG_AUTH_USER_MAX_LEN) {
+                cJSON_Delete(json);
+                return send_json_error(req, 400, "Username must be 1-32 characters");
+            }
+            user = new_user->valuestring;
+        }
+
         config_set_auth(user, new_pass->valuestring);
         auth_invalidate_all_sessions();
     }
@@ -582,6 +656,7 @@ static esp_err_t handle_config_post(httpd_req_t *req)
 static esp_err_t handle_reset(httpd_req_t *req)
 {
     if (!require_auth(req)) return ESP_OK;
+    if (!require_password_changed(req)) return ESP_OK;
     esp_err_t err = gpio_sbc_reset();
     httpd_resp_set_type(req, "application/json");
     return err == ESP_OK ? httpd_resp_send(req, "{\"ok\":true}", 11)
@@ -591,6 +666,7 @@ static esp_err_t handle_reset(httpd_req_t *req)
 static esp_err_t handle_power(httpd_req_t *req)
 {
     if (!require_auth(req)) return ESP_OK;
+    if (!require_password_changed(req)) return ESP_OK;
 
     if (req->content_len >= 128) {
         return send_json_error(req, 400, "Invalid request size");
@@ -635,6 +711,7 @@ respond:
 static esp_err_t handle_ota(httpd_req_t *req)
 {
     if (!require_auth(req)) return ESP_OK;
+    if (!require_password_changed(req)) return ESP_OK;
 
     esp_ota_handle_t ota_handle = 0;
     const esp_partition_t *update_partition = esp_ota_get_next_update_partition(NULL);
@@ -710,6 +787,7 @@ static esp_err_t handle_ota(httpd_req_t *req)
 static esp_err_t handle_esp_reboot(httpd_req_t *req)
 {
     if (!require_auth(req)) return ESP_OK;
+    if (!require_password_changed(req)) return ESP_OK;
     ESP_LOGI(TAG, "ESP reboot requested via API");
     httpd_resp_set_type(req, "application/json");
     set_cors_headers(req);
@@ -724,6 +802,7 @@ static esp_err_t handle_esp_reboot(httpd_req_t *req)
 static esp_err_t handle_tls_upload(httpd_req_t *req)
 {
     if (!require_auth(req)) return ESP_OK;
+    if (!require_password_changed(req)) return ESP_OK;
 
     if (req->content_len == 0 || req->content_len > 8192) {
         return send_json_error(req, 400, "Invalid content length");
@@ -833,6 +912,7 @@ static esp_err_t handle_tls_upload(httpd_req_t *req)
 static esp_err_t handle_ota_check(httpd_req_t *req)
 {
     if (!require_auth(req)) return ESP_OK;
+    if (!require_password_changed(req)) return ESP_OK;
 
     ota_github_check_result_t result;
     esp_err_t err = ota_github_check(&result);
@@ -857,6 +937,7 @@ static esp_err_t handle_ota_check(httpd_req_t *req)
 static esp_err_t handle_ota_github(httpd_req_t *req)
 {
     if (!require_auth(req)) return ESP_OK;
+    if (!require_password_changed(req)) return ESP_OK;
 
     ota_github_check_result_t result;
     esp_err_t err = ota_github_check(&result);
@@ -911,8 +992,9 @@ static esp_err_t handle_ws(httpd_req_t *req)
          * 401 body would just be stray bytes on a live socket. Returning an
          * error makes httpd close the session instead. */
         int fd = httpd_req_to_sockfd(req);
-        if (!authed) {
-            ESP_LOGW(TAG, "WS handshake rejected (unauthenticated): fd=%d", fd);
+        if (!authed || !config_get()->auth_initialized) {
+            ESP_LOGW(TAG, "WS handshake rejected (%s): fd=%d",
+                     !authed ? "unauthenticated" : "default password still in use", fd);
             return ESP_FAIL;
         }
         if (!ws_add_client(fd, port_index)) {
@@ -971,6 +1053,10 @@ static esp_err_t handle_ws(httpd_req_t *req)
 
 static esp_err_t handle_get_token(httpd_req_t *req)
 {
+    /* Gated too, because this hands out the credential the WebSocket handshake
+     * accepts — no point locking /ws and leaving its ticket mint open. */
+    if (!require_password_changed(req)) return ESP_OK;
+
     char *token = auth_get_token_from_request(req);
     if (!token || !auth_validate_session(token)) {
         free(token);

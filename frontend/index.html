@@ -100,6 +100,16 @@ body {
 #wifi-status { color: var(--success); }
 #settings-status { color: var(--accent); text-align: center; }
 .xterm{cursor:text;position:relative;user-select:none;-ms-user-select:none;-webkit-user-select:none}.xterm.focus,.xterm:focus{outline:0}.xterm .xterm-helpers{position:absolute;top:0;z-index:5}.xterm .xterm-helper-textarea{padding:0;border:0;margin:0;position:absolute;opacity:0;left:-9999em;top:0;width:0;height:0;z-index:-5;white-space:nowrap;overflow:hidden;resize:none}.xterm .composition-view{background:#000;color:#fff;display:none;position:absolute;white-space:nowrap;z-index:1}.xterm .composition-view.active{display:block}.xterm .xterm-viewport{background-color:#000;overflow-y:scroll;cursor:default;position:absolute;right:0;left:0;top:0;bottom:0}.xterm .xterm-screen{position:relative}.xterm .xterm-screen canvas{position:absolute;left:0;top:0}.xterm-char-measure-element{display:inline-block;visibility:hidden;position:absolute;top:0;left:-9999em;line-height:normal}.xterm.enable-mouse-events{cursor:default}.xterm .xterm-cursor-pointer,.xterm.xterm-cursor-pointer{cursor:pointer}.xterm.column-select.focus{cursor:crosshair}.xterm .xterm-accessibility:not(.debug),.xterm .xterm-message{position:absolute;left:0;top:0;bottom:0;right:0;z-index:10;color:transparent;pointer-events:none}.xterm .xterm-accessibility-tree:not(.debug) ::selection{color:transparent}.xterm .xterm-accessibility-tree{font-family:monospace;user-select:text;white-space:pre}.xterm .xterm-accessibility-tree>div{transform-origin:left;width:fit-content}.xterm .live-region{position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden}.xterm-dim{opacity:1!important}.xterm-underline-1{text-decoration:underline}.xterm-underline-2{text-decoration:double underline}.xterm-underline-3{text-decoration:wavy underline}.xterm-underline-4{text-decoration:dotted underline}.xterm-underline-5{text-decoration:dashed underline}.xterm-overline{text-decoration:overline}.xterm-overline.xterm-underline-1{text-decoration:overline underline}.xterm-overline.xterm-underline-2{text-decoration:overline double underline}.xterm-overline.xterm-underline-3{text-decoration:overline wavy underline}.xterm-overline.xterm-underline-4{text-decoration:overline dotted underline}.xterm-overline.xterm-underline-5{text-decoration:overline dashed underline}.xterm-strikethrough{text-decoration:line-through}.xterm-screen .xterm-decoration-container .xterm-decoration{z-index:6;position:absolute}.xterm-screen .xterm-decoration-container .xterm-decoration.xterm-decoration-top-layer{z-index:7}.xterm-decoration-overview-ruler{z-index:8;position:absolute;top:0;right:0;pointer-events:none}.xterm-decoration-top{z-index:2;position:relative}.xterm .xterm-scrollable-element>.scrollbar{cursor:default}.xterm .xterm-scrollable-element>.scrollbar>.scra{cursor:pointer;font-size:11px!important}.xterm .xterm-scrollable-element>.visible{opacity:1;background:rgba(0,0,0,0);transition:opacity .1s linear;z-index:11}.xterm .xterm-scrollable-element>.invisible{opacity:0;pointer-events:none}.xterm .xterm-scrollable-element>.invisible.fade{transition:opacity .8s linear}.xterm .xterm-scrollable-element>.shadow{position:absolute;display:none}.xterm .xterm-scrollable-element>.shadow.top{display:block;top:0;left:3px;height:3px;width:100%;box-shadow:var(--vscode-scrollbar-shadow,#000) 0 6px 6px -6px inset}.xterm .xterm-scrollable-element>.shadow.left{display:block;top:3px;left:0;height:100%;width:3px;box-shadow:var(--vscode-scrollbar-shadow,#000) 6px 0 6px -6px inset}.xterm .xterm-scrollable-element>.shadow.top-left-corner{display:block;top:0;left:0;height:3px;width:3px}.xterm .xterm-scrollable-element>.shadow.top.left{box-shadow:var(--vscode-scrollbar-shadow,#000) 6px 0 6px -6px inset}
+#setup-lock {
+    display: flex; align-items: center; gap: 10px; padding: 8px 12px;
+    background: #421f1f; border-bottom: 1px solid var(--danger);
+    font-size: 13px; flex-shrink: 0; flex-wrap: wrap;
+}
+#setup-lock.hidden { display: none; }
+#setup-lock button {
+    font-size: 13px; padding: 4px 10px; border: 1px solid var(--danger);
+    border-radius: 4px; background: var(--danger); color: #fff; cursor: pointer;
+}
 @media (max-width: 600px) {
     #toolbar { padding: 4px 8px; gap: 4px; }
     #toolbar select, #toolbar button { font-size: 12px; padding: 3px 6px; }
@@ -146,6 +156,11 @@ body {
         <button id="btn-logout">Logout</button>
     </div>
 
+    <div id="setup-lock" class="hidden">
+        <span>The default password is still in use, so the terminal, GPIO and settings changes are locked.</span>
+        <button id="btn-setup-lock-fix">Change password now</button>
+    </div>
+
     <div id="settings-overlay" class="hidden">
         <div id="settings-box">
             <h2>Settings</h2>
@@ -177,7 +192,7 @@ body {
             <fieldset>
                 <legend>Change Password</legend>
                 <input type="password" id="cur-pass" placeholder="Current password" autocomplete="current-password">
-                <input type="password" id="new-pass" placeholder="New password" autocomplete="new-password">
+                <input type="password" id="new-pass" placeholder="New password (8+ chars)" autocomplete="new-password">
                 <input type="password" id="new-pass2" placeholder="Confirm password" autocomplete="new-password">
                 <button id="btn-pass-save">Change Password</button>
             </fieldset>
@@ -280,6 +295,8 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
     var wifiStatus = document.getElementById("wifi-status");
     var terminalContainer = document.getElementById("terminal-container");
     var btnPower = document.getElementById("btn-power");
+    var setupLock = document.getElementById("setup-lock");
+    var setupLocked = false;
 
     // --- Helpers ---
 
@@ -287,6 +304,25 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
         statusDot.classList.toggle("connected", connected);
         statusText.textContent = text;
     }
+
+    /* The firmware refuses privileged endpoints (and the WebSocket handshake)
+     * until the default password is replaced. Surface that instead of leaving
+     * the user with an unexplained "Disconnected", and stop reconnecting — an
+     * attempt would just be rejected every 3 seconds forever. */
+    function updateSetupLock(conf) {
+        if (!conf) return;
+        setupLocked = (conf.auth_initialized === false);
+        setupLock.classList.toggle("hidden", !setupLocked);
+        if (!setupLocked) return;
+        setStatus(false, "Locked — default password in use");
+        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+        if (ws) { ws.onclose = null; ws.close(); ws = null; }
+    }
+
+    document.getElementById("btn-setup-lock-fix").addEventListener("click", function() {
+        document.getElementById("btn-settings").click();
+        document.getElementById("new-pass").focus();
+    });
 
     function api(method, url, data, cb) {
         var xhr = new XMLHttpRequest();
@@ -351,6 +387,7 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
     function connectWs() {
         if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
         if (!sessionToken || !term) return;
+        if (setupLocked) { setStatus(false, "Locked — default password in use"); return; }
 
         var proto = location.protocol === "https:" ? "wss:" : "ws:";
         ws = new WebSocket(proto + "//" + location.host + "/ws?token=" + encodeURIComponent(sessionToken) + "&port=" + currentPort);
@@ -391,6 +428,11 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
     function onLoginSuccess(data) {
         sessionToken = data.token;
         loginOverlay.classList.add("hidden");
+        /* Trust the login response here, not the async loadConfig below: it
+         * returns after connectWs() runs, so relying on it alone would leave the
+         * terminal locked until a reload even after a successful password change. */
+        setupLocked = !!data.must_change_password;
+        setupLock.classList.toggle("hidden", !setupLocked);
         loadConfig();
         // connectWs is called by initTerminal or after xterm loads
         if (term) {
@@ -428,6 +470,7 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
     function loadConfig() {
         api("GET", "/api/config", null, function(err, conf) {
             if (err || !conf) return;
+            updateSetupLock(conf);
             if (conf.ports && conf.ports.length > 0) {
                 ports = conf.ports;
                 setupPortSelector(conf.ports);
@@ -765,7 +808,7 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
         var p1 = document.getElementById("new-pass").value;
         var p2 = document.getElementById("new-pass2").value;
         if (!cp) { showSettingsMsg("Enter current password", true); return; }
-        if (!p1 || p1.length < 4) { showSettingsMsg("Min 4 characters", true); return; }
+        if (!p1 || p1.length < 8) { showSettingsMsg("Min 8 characters", true); return; }
         if (p1 !== p2) { showSettingsMsg("Passwords don't match", true); return; }
         api("POST", "/api/config", {current_password: cp, new_password: p1}, function(err, res) {
             if (!err && res && res.ok) {
@@ -975,6 +1018,7 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
                 baudSelect.value = String(conf.baud_rate);
             }
             updatePowerButton(conf.power_on);
+            updateSetupLock(conf);
             // Fetch token for WebSocket auth; connectWs called once xterm loads
             api("GET", "/api/token", null, function(terr, tdata) {
                 if (!terr && tdata && tdata.token) {

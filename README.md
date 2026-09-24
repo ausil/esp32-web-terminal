@@ -121,7 +121,7 @@ run `tools/factory_flash.py --help` and see the script header for the format
    - **Username:** `admin`
    - **Password:** `admin`
 
-4. You'll be prompted to change the default password on first login.
+4. You'll be prompted to change the default password on first login. Until you do, the device is locked: the terminal, GPIO controls, OTA updates and settings changes all refuse with `403`, and a banner points you at the password field.
 
 5. Open **Settings** to configure your device name, WiFi network, and timezone.
 
@@ -168,7 +168,7 @@ Upload new firmware via **Settings > Firmware Update**. The device reboots after
 
 ## REST API
 
-All API endpoints require authentication via session cookie (obtained from `/api/login`).
+All API endpoints require authentication via session cookie (obtained from `/api/login`). While the factory `admin`/`admin` password is still in place, every endpoint except `GET /api/config` and `GET /api/sysinfo` returns `403 Forbidden`.
 
 | Method | Endpoint       | Description                          | Body                                             |
 |--------|---------------|--------------------------------------|--------------------------------------------------|
@@ -202,10 +202,10 @@ All fields are optional in POST requests; include only what you want to change:
 ## Security
 
 - **TLS** — all HTTP and WebSocket traffic encrypted with a self-signed ECC P-256 certificate embedded in firmware
-- **Authentication** — salted SHA-256 password hashing stored in NVS; plain-text passwords are never stored
+- **Authentication** — PBKDF2-HMAC-SHA256 (10,000 iterations) with a per-device random salt, stored in NVS; plain-text passwords are never stored
 - **Session management** — up to 4 concurrent sessions with 1-hour timeout, using 32-byte random tokens
 - **Rate limiting** — 5 failed login attempts triggers a 5-minute lockout
-- **Default credentials** — `admin`/`admin` with forced password change on first login
+- **Default credentials** — `admin`/`admin`, and the change is **enforced server-side**: until the password is replaced, the terminal WebSocket, GPIO, OTA, TLS upload, WiFi scan and all settings mutations return `403`, so the device is reachable but inert. Only `GET /api/config` and `GET /api/sysinfo` respond, and the UI shows a banner explaining the lock. Minimum new-password length is 8 characters, checked by the firmware rather than the page
 - **CORS** — API responses restrict cross-origin access
 - **Paste throttling** — large pastes chunked (64 bytes / 10ms) to prevent UART buffer overflow
 - **Navigation guard** — browser warns before closing an active terminal session

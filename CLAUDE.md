@@ -36,7 +36,7 @@ main/
   main.c            - Entry point: init all subsystems, NTP setup, OTA rollback verification
   config.c/h        - NVS persistent config (WiFi, baud, auth, device name, NTP, GPIO defaults)
   wifi_manager.c/h  - AP+STA WiFi with auto-fallback, mDNS, DHCP hostname, reconnect watchdog
-  auth.c/h          - Session-based auth, salted SHA-256, rate limiting
+  auth.c/h          - Session-based auth, PBKDF2-HMAC-SHA256, rate limiting
   serial_port.c/h   - Port abstraction layer (UART + USB CDC-ACM), multi-port dispatch
   uart_bridge.c/h   - UART1 ↔ WebSocket bridge, configurable baud (pins vary by target)
   usb_cdc_bridge.c/h - USB Host CDC-ACM bridge (ESP32-S3 only), hot-plug, VCP drivers
@@ -112,11 +112,16 @@ Pins are target-conditional (`#if CONFIG_IDF_TARGET_ESP32C3` in headers).
 - Timezone: POSIX TZ string stored in NVS, applied via setenv("TZ")/tzset()
 - CORS: API responses set Access-Control-Allow-Origin: null and X-Content-Type-Options: nosniff
 - Paste throttle: large pastes chunked at 64 bytes / 10ms in frontend
+- Setup mode: while `auth_initialized` is false (admin/admin never changed), `/ws`, `/api/token`,
+  `/api/reset`, `/api/power`, `/api/ota*`, `/api/tls`, `/api/reboot`, `/api/wifi/scan` return 403 and
+  `POST /api/config` accepts only new_password/current_password/username; `GET /api/config` and
+  `/api/sysinfo` stay open so the UI can render and show the lock banner
+- Password policy: firmware requires 8+ characters (MIN_PASSWORD_LEN) and a 1-32 char username
 
 ## Conventions
 
 - C source uses ESP-IDF logging (`ESP_LOGI`, `ESP_LOGW`, `ESP_LOGE`)
 - Frontend uses vanilla JS (no build step)
 - All frontend/cert files embedded in firmware via `EMBED_TXTFILES` / `EMBED_FILES`
-- Default credentials: admin/admin (forced password change on first login)
+- Default credentials: admin/admin; the password change is enforced server-side (see Setup mode)
 - Avoid enum names clashing with ESP-IDF (use WIFI_MGR_MODE_AP etc)
