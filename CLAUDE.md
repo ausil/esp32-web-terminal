@@ -126,6 +126,14 @@ Pins are target-conditional (`#if CONFIG_IDF_TARGET_ESP32C3` in headers).
   `POST /api/config` accepts only new_password/current_password/username; `GET /api/config` and
   `/api/sysinfo` stay open so the UI can render and show the lock banner
 - Password policy: firmware requires 8+ characters (MIN_PASSWORD_LEN) and a 1-32 char username
+- Request bodies: read with `read_body()` in web_server.c, never a bare `httpd_req_recv()` —
+  it may short-read, and every JSON handler would parse a truncated body as invalid JSON
+- WS clients are tracked by socket fd but carry the session token they authenticated with, and
+  are re-validated on the push path (throttled to 1/s). Never close() a tracked fd directly:
+  esp_http_server has no cross-task teardown, and closing the number races with its reuse
+- No `ESP_ERROR_CHECK` on any path reachable from an HTTP handler or the WiFi event loop — it
+  aborts and reboots. Boot-time init in `wifi_manager_start()` is the only place it's acceptable
+- Login counters are per address (AUTH_TRACKED_HOSTS table, sized against max_open_sockets)
 
 ## Conventions
 

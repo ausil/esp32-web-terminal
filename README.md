@@ -213,10 +213,16 @@ other unchanged.
 
 ## Security
 
+**Update to 1.6.0.** Releases through 1.5.2 let an unauthenticated host on the
+network open the serial console — which for most deployments is a root shell on
+the attached SBC. [SECURITY.md](SECURITY.md) has the advisory and
+[CHANGELOG.md](CHANGELOG.md) lists everything that changed;
+[SECURITY.md](SECURITY.md) also covers how to report a vulnerability.
+
 - **TLS** — all HTTP and WebSocket traffic encrypted with a self-signed ECC P-256 certificate embedded in firmware
 - **Authentication** — PBKDF2-HMAC-SHA256 (10,000 iterations) with a per-device random salt, stored in NVS; plain-text passwords are never stored
-- **Session management** — up to 4 concurrent sessions with 1-hour timeout, using 32-byte random tokens
-- **Rate limiting** — 5 failed login attempts triggers a 5-minute lockout. The counter is device-wide rather than per-client, so an attacker who knows this can lock the real owner out for 5 minutes at will
+- **Session management** — up to 4 concurrent sessions with 1-hour timeout, using 32-byte random tokens. An open terminal is re-checked against its session as data flows, so a password change, a logout, or a timeout cuts the serial stream immediately rather than whenever TCP notices
+- **Rate limiting** — 5 failed login attempts locks out that address for 5 minutes. Counters are per address, so one client guessing passwords can't lock the real owner out
 - **Default credentials** — `admin`/`admin`, and the change is **enforced server-side**: until the password is replaced, the terminal WebSocket, token mint, GPIO, OTA, TLS upload, ESP reboot, WiFi scan and all settings mutations return `403`, so the device is reachable but inert. Only `GET /api/config` and `GET /api/sysinfo` respond besides login/logout, and the UI shows a banner explaining the lock. Minimum new-password length is 8 characters, checked by the firmware rather than the page
 - **CORS** — API responses restrict cross-origin access
 - **Paste throttling** — large pastes chunked (64 bytes / 10ms) to prevent UART buffer overflow
