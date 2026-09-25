@@ -72,38 +72,42 @@ esp_err_t gpio_sbc_reset(void)
     return ESP_OK;
 }
 
+/* Every power change goes through here so the relay interval can't be stepped
+ * around: the guard protects a physical relay from rapid cycling, and POST
+ * /api/power reaches this code by two paths — toggle, and an explicit
+ * {"power":bool} that used to call gpio_set_level() directly and skip it.
+ * Asking for the state we are already in moves nothing, so it stays free. */
+static esp_err_t power_set(bool on)
+{
+    if (s_status.power_on == on) return ESP_OK;
+
+    int64_t now = esp_timer_get_time();
+    if (s_status.last_power_toggle > 0 &&
+        (now - s_status.last_power_toggle) < (MIN_POWER_TOGGLE_MS * 1000)) {
+        ESP_LOGW(TAG, "Power change too fast, ignoring");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    gpio_set_level(GPIO_SBC_POWER, on ? 1 : 0);
+    s_status.power_on = on;
+    s_status.last_power_toggle = now;
+    ESP_LOGI(TAG, "SBC power %s", on ? "ON" : "OFF");
+    return ESP_OK;
+}
+
 esp_err_t gpio_sbc_power_on(void)
 {
-    gpio_set_level(GPIO_SBC_POWER, 1);
-    s_status.power_on = true;
-    s_status.last_power_toggle = esp_timer_get_time();
-    ESP_LOGI(TAG, "SBC power ON");
-    return ESP_OK;
+    return power_set(true);
 }
 
 esp_err_t gpio_sbc_power_off(void)
 {
-    gpio_set_level(GPIO_SBC_POWER, 0);
-    s_status.power_on = false;
-    s_status.last_power_toggle = esp_timer_get_time();
-    ESP_LOGI(TAG, "SBC power OFF");
-    return ESP_OK;
+    return power_set(false);
 }
 
 esp_err_t gpio_sbc_power_toggle(void)
 {
-    int64_t now = esp_timer_get_time();
-    if (s_status.last_power_toggle > 0 &&
-        (now - s_status.last_power_toggle) < (MIN_POWER_TOGGLE_MS * 1000)) {
-        ESP_LOGW(TAG, "Power toggle too fast, ignoring");
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    if (s_status.power_on) {
-        return gpio_sbc_power_off();
-    } else {
-        return gpio_sbc_power_on();
-    }
+    return power_set(!s_status.power_on);
 }
 
 gpio_status_t gpio_get_status(void)

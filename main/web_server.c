@@ -110,17 +110,36 @@ static void load_or_save_certs(void)
 
 // --- WebSocket client tracking ---
 #define MAX_WS_CLIENTS 4
+#define WS_AUTH_RECHECK_US 1000000  // re-validate a live client at most once a second
 
 typedef struct {
     int fd;
     bool active;
     int port_index;
+    /* Session token captured at handshake. esp_http_server has no API for
+     * tearing down a websocket from another task, and close()ing the fd from
+     * here would race with httpd reusing the number for a different socket, so
+     * revocation works by refusing to send: a client whose session has gone
+     * away stops receiving serial data on the next push. The close frame is
+     * best-effort tidying — browsers answer it, which is what tells httpd to
+     * reap the session. */
+    char token[AUTH_SESSION_TOKEN_LEN * 2 + 1];
+    int64_t last_auth_us;
 } ws_client_t;
 
 static ws_client_t s_ws_clients[MAX_WS_CLIENTS];
 static SemaphoreHandle_t s_ws_mutex = NULL;
 
-static bool ws_add_client(int fd, int port_index)
+/* Bounded and always NUL-terminated, since the copy is later handed to
+ * auth_validate_session() as a C string. strlcpy is deliberately not used — it
+ * isn't available on every libc IDF builds against. */
+static void copy_token(char *dst, size_t dst_len, const char *src)
+{
+    strncpy(dst, src, dst_len - 1);
+    dst[dst_len - 1] = '\0';
+}
+
+static bool ws_add_client(int fd, int port_index, const char *token)
 {
     xSemaphoreTake(s_ws_mutex, portMAX_DELAY);
     for (int i = 0; i < MAX_WS_CLIENTS; i++) {
@@ -128,6 +147,8 @@ static bool ws_add_client(int fd, int port_index)
             s_ws_clients[i].fd = fd;
             s_ws_clients[i].active = true;
             s_ws_clients[i].port_index = port_index;
+            copy_token(s_ws_clients[i].token, sizeof(s_ws_clients[i].token), token);
+            s_ws_clients[i].last_auth_us = esp_timer_get_time();
             xSemaphoreGive(s_ws_mutex);
             ESP_LOGI(TAG, "WS client added: fd=%d slot=%d port=%d", fd, i, port_index);
             return true;
@@ -136,6 +157,44 @@ static bool ws_add_client(int fd, int port_index)
     xSemaphoreGive(s_ws_mutex);
     ESP_LOGW(TAG, "WS client slots full, rejecting fd=%d", fd);
     return false;
+}
+
+/* Caller holds s_ws_mutex. Marked inactive first so a peer that ignores the
+ * close frame still gets no data. */
+static void ws_evict_client(int i, const char *why)
+{
+    int fd = s_ws_clients[i].fd;
+    s_ws_clients[i].active = false;
+    ESP_LOGI(TAG, "WS fd=%d closed (%s)", fd, why);
+
+    httpd_ws_frame_t close_pkt = { .type = HTTPD_WS_TYPE_CLOSE, .payload = NULL, .len = 0 };
+    httpd_ws_send_frame_async(s_server, fd, &close_pkt);
+}
+
+/* Caller holds s_ws_mutex. Covers every way a session can stop being valid —
+ * password change, logout, or the one-hour timeout — without depending on the
+ * client to disconnect. Throttled because this sits on the serial push path. */
+static void ws_revalidate_locked(void)
+{
+    int64_t now = esp_timer_get_time();
+    for (int i = 0; i < MAX_WS_CLIENTS; i++) {
+        if (!s_ws_clients[i].active) continue;
+        if (now - s_ws_clients[i].last_auth_us < WS_AUTH_RECHECK_US) continue;
+        s_ws_clients[i].last_auth_us = now;
+        if (!auth_validate_session(s_ws_clients[i].token)) {
+            ws_evict_client(i, "session no longer valid");
+        }
+    }
+}
+
+void web_server_ws_close_all(const char *why)
+{
+    if (!s_server || !s_ws_mutex) return;
+    xSemaphoreTake(s_ws_mutex, portMAX_DELAY);
+    for (int i = 0; i < MAX_WS_CLIENTS; i++) {
+        if (s_ws_clients[i].active) ws_evict_client(i, why);
+    }
+    xSemaphoreGive(s_ws_mutex);
 }
 
 static void ws_remove_client(int fd)
@@ -161,6 +220,7 @@ void web_server_ws_broadcast(int port_index, const uint8_t *data, size_t len)
     };
 
     xSemaphoreTake(s_ws_mutex, portMAX_DELAY);
+    ws_revalidate_locked();
     for (int i = 0; i < MAX_WS_CLIENTS; i++) {
         if (s_ws_clients[i].active && s_ws_clients[i].port_index == port_index) {
             esp_err_t err = httpd_ws_send_frame_async(s_server, s_ws_clients[i].fd, &ws_pkt);
@@ -183,6 +243,7 @@ void web_server_ws_broadcast_text(const char *text)
     };
 
     xSemaphoreTake(s_ws_mutex, portMAX_DELAY);
+    ws_revalidate_locked();
     for (int i = 0; i < MAX_WS_CLIENTS; i++) {
         if (s_ws_clients[i].active) {
             esp_err_t err = httpd_ws_send_frame_async(s_server, s_ws_clients[i].fd, &ws_pkt);
@@ -578,13 +639,23 @@ static esp_err_t handle_config_post(httpd_req_t *req)
             cJSON_Delete(json);
             return send_json_error(req, 400, "AP password must be 8+ characters or empty for open");
         }
-        wifi_manager_update_ap(ap_ssid->valuestring, ap_pass->valuestring);
+        esp_err_t ap_err = wifi_manager_update_ap(ap_ssid->valuestring, ap_pass->valuestring);
+        if (ap_err != ESP_OK) {
+            cJSON_Delete(json);
+            return send_json_error(req, 400, "AP reconfiguration failed");
+        }
     }
 
     const cJSON *ssid = cJSON_GetObjectItem(json, "sta_ssid");
     const cJSON *pass = cJSON_GetObjectItem(json, "sta_pass");
     if (cJSON_IsString(ssid) && cJSON_IsString(pass)) {
-        wifi_manager_connect_sta(ssid->valuestring, pass->valuestring);
+        /* Reported rather than swallowed: the old code answered {"ok":true} no
+         * matter what connect_sta() made of the credentials. */
+        esp_err_t sta_err = wifi_manager_connect_sta(ssid->valuestring, pass->valuestring);
+        if (sta_err != ESP_OK) {
+            cJSON_Delete(json);
+            return send_json_error(req, 400, "Invalid SSID or password");
+        }
     }
 
     const cJSON *power_default = cJSON_GetObjectItem(json, "power_on_default");
@@ -612,7 +683,11 @@ static esp_err_t handle_config_post(httpd_req_t *req)
 
     const cJSON *wifi_disconnect = cJSON_GetObjectItem(json, "wifi_disconnect");
     if (cJSON_IsTrue(wifi_disconnect)) {
-        wifi_manager_disconnect_sta();
+        esp_err_t dc_err = wifi_manager_disconnect_sta();
+        if (dc_err != ESP_OK) {
+            cJSON_Delete(json);
+            return send_json_error(req, 400, "Could not switch to AP mode");
+        }
     }
 
     const cJSON *new_pass = cJSON_GetObjectItem(json, "new_password");
@@ -646,6 +721,10 @@ static esp_err_t handle_config_post(httpd_req_t *req)
 
         config_set_auth(user, new_pass->valuestring);
         auth_invalidate_all_sessions();
+        /* Revoking sessions doesn't touch sockets already upgraded, and a
+         * terminal that was open a moment ago would otherwise keep streaming
+         * serial data to whoever held it, indefinitely. */
+        web_server_ws_close_all("credentials changed");
     }
 
     cJSON_Delete(json);
@@ -701,7 +780,7 @@ respond:
                  status.power_on ? "true" : "false");
         return httpd_resp_send(req, resp, strlen(resp));
     } else if (err == ESP_ERR_INVALID_STATE) {
-        return send_json_error(req, 429, "Power toggle too fast");
+        return send_json_error(req, 429, "Power change too fast");
     }
     return send_json_error(req, 400, "Power control failed");
 }
@@ -967,17 +1046,31 @@ static esp_err_t handle_ota_github(httpd_req_t *req)
 static esp_err_t handle_ws(httpd_req_t *req)
 {
     if (req->method == HTTP_GET) {
-        /* WebSocket handshake — check auth via cookie, header, or query param */
-        bool authed = auth_check_request(req);
+        /* WebSocket handshake — check auth via cookie, header, or query param.
+         * The token is kept for the life of the connection so the push path can
+         * keep checking it; see ws_client_t. */
+        char token[AUTH_SESSION_TOKEN_LEN * 2 + 1] = {0};
+        bool authed = false;
+        char *sess_tok = auth_get_token_from_request(req);
+        if (sess_tok) {
+            if (auth_validate_session(sess_tok)) {
+                copy_token(token, sizeof(token), sess_tok);
+                authed = true;
+            }
+            free(sess_tok);
+        }
+
         int port_index = 0;
         size_t qlen = httpd_req_get_url_query_len(req);
         if (qlen > 0) {
             char *query = malloc(qlen + 1);
             if (query && httpd_req_get_url_query_str(req, query, qlen + 1) == ESP_OK) {
                 if (!authed) {
-                    char token[128];
-                    if (httpd_query_key_value(query, "token", token, sizeof(token)) == ESP_OK) {
-                        authed = auth_validate_session(token);
+                    char qtok[128];
+                    if (httpd_query_key_value(query, "token", qtok, sizeof(qtok)) == ESP_OK &&
+                        auth_validate_session(qtok)) {
+                        copy_token(token, sizeof(token), qtok);
+                        authed = true;
                     }
                 }
                 char port_str[8];
@@ -997,7 +1090,7 @@ static esp_err_t handle_ws(httpd_req_t *req)
                      !authed ? "unauthenticated" : "default password still in use", fd);
             return ESP_FAIL;
         }
-        if (!ws_add_client(fd, port_index)) {
+        if (!ws_add_client(fd, port_index, token)) {
             return ESP_FAIL;
         }
         ESP_LOGI(TAG, "WS client connected: fd=%d port=%d", fd, port_index);

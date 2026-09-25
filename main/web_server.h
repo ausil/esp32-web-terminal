@@ -14,3 +14,8 @@ void web_server_ws_broadcast(int port_index, const uint8_t *data, size_t len);
 
 // Broadcast a text message to all WebSocket clients (for status events)
 void web_server_ws_broadcast_text(const char *text);
+
+// Close every live WebSocket session now, with a reason for the log. Needed
+// because a session can be revoked (password change) while its terminal socket
+// is still open and streaming serial data.
+void web_server_ws_close_all(const char *why);

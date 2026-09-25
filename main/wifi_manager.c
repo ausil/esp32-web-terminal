@@ -21,6 +21,11 @@ static const char *TAG = "wifi_mgr";
 #define WIFI_FAIL_BIT       BIT1
 #define MAX_STA_RETRIES     5
 
+/* wifi_config_t field sizes, named so the input checks read as limits rather
+ * than as magic numbers (an SSID is 1-32 bytes, a passphrase 0-64) */
+#define STA_SSID_MAXLEN  sizeof(((wifi_config_t *)0)->sta.ssid)
+#define STA_PASS_MAXLEN  sizeof(((wifi_config_t *)0)->sta.password)
+
 static EventGroupHandle_t s_wifi_event_group;
 static int s_retry_count = 0;
 static wifi_manager_status_t s_status;
@@ -144,7 +149,15 @@ static esp_err_t start_ap(const char *ssid, const char *password)
         ESP_LOGW(TAG, "AP password too short, using open auth");
     }
 
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
+    /* Not ESP_ERROR_CHECK: start_ap() is also called at runtime — from the
+     * STA-lost path in event_handler (the system event loop task) and from
+     * wifi_manager_update_ap() (the httpd task) — and aborting either of those
+     * takes the whole device down with it. */
+    esp_err_t cfg_err = esp_wifi_set_config(WIFI_IF_AP, &ap_config);
+    if (cfg_err != ESP_OK) {
+        ESP_LOGE(TAG, "AP config rejected (%s), SSID='%s'", esp_err_to_name(cfg_err), ssid);
+        return cfg_err;
+    }
 
     // Get AP IP
     esp_netif_ip_info_t ip_info;
@@ -253,6 +266,14 @@ esp_err_t wifi_manager_init(void)
     build_ap_ssid(conf->ap_ssid, ap_ssid, sizeof(ap_ssid));
 
     bool has_sta_config = strlen(conf->sta_ssid) > 0;
+    if (has_sta_config && strlen(conf->sta_ssid) > STA_SSID_MAXLEN) {
+        /* Reachable via a hand-edited tools/factory_flash.py --config seed or a
+         * value written by older firmware, and until now it cost a boot loop on
+         * a device that may already be mounted. */
+        ESP_LOGE(TAG, "Stored STA SSID is %u characters (max %u), ignoring it",
+                 (unsigned)strlen(conf->sta_ssid), (unsigned)STA_SSID_MAXLEN);
+        has_sta_config = false;
+    }
 
     if (has_sta_config) {
         // Try AP+STA mode
@@ -261,23 +282,36 @@ esp_err_t wifi_manager_init(void)
 
         start_ap(ap_ssid, conf->ap_pass);
 
-        wifi_config_t sta_config = {};
+        wifi_config_t sta_config = {0};
         strncpy((char *)sta_config.sta.ssid, conf->sta_ssid, sizeof(sta_config.sta.ssid));
         strncpy((char *)sta_config.sta.password, conf->sta_pass, sizeof(sta_config.sta.password));
         sta_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
-        ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_config));
+
+        /* Not ESP_ERROR_CHECK: this device normally has nobody next to it, and
+         * the only person who can fix a bad stored network is one who can reach
+         * its AP, so keep the AP up rather than take the device down. */
+        esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &sta_config);
+        bool sta_usable = (err == ESP_OK);
+        if (!sta_usable) {
+            ESP_LOGE(TAG, "Stored STA config rejected (%s), staying in AP-only mode",
+                     esp_err_to_name(err));
+            s_status.mode = WIFI_MGR_MODE_AP;
+        }
+
         ESP_ERROR_CHECK(esp_wifi_start());
 
-        ESP_LOGI(TAG, "Connecting to STA SSID='%s'...", conf->sta_ssid);
+        if (sta_usable) {
+            ESP_LOGI(TAG, "Connecting to STA SSID='%s'...", conf->sta_ssid);
 
-        EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
-                                                WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
-                                                pdFALSE, pdFALSE, pdMS_TO_TICKS(15000));
+            EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
+                                                   WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+                                                   pdFALSE, pdFALSE, pdMS_TO_TICKS(15000));
 
-        if (bits & WIFI_CONNECTED_BIT) {
-            ESP_LOGI(TAG, "STA connected, AP disabled");
-        } else {
-            ESP_LOGW(TAG, "STA connection failed, AP still active");
+            if (bits & WIFI_CONNECTED_BIT) {
+                ESP_LOGI(TAG, "STA connected, AP disabled");
+            } else {
+                ESP_LOGW(TAG, "STA connection failed, AP still active");
+            }
         }
     } else {
         // AP-only mode
@@ -291,14 +325,36 @@ esp_err_t wifi_manager_init(void)
     return ESP_OK;
 }
 
+/* Called from POST /api/config, so nothing here may abort: an ESP_ERROR_CHECK
+ * on this path hands anyone with a session (or a settings page left open in a
+ * browser) a remote reboot, and the panic lands in the httpd task with a client
+ * waiting on a response. */
 esp_err_t wifi_manager_connect_sta(const char *ssid, const char *password)
 {
+    /* Checked before anything is persisted. An empty SSID makes
+     * esp_wifi_set_config() return an error, and the credentials go into NVS
+     * first, so unchecked input would be replayed by wifi_manager_start() on
+     * every subsequent boot. Sizes are wifi_config_t's sta.ssid/sta.password. */
+    size_t ssid_len = strlen(ssid);
+    if (ssid_len == 0 || ssid_len > STA_SSID_MAXLEN) {
+        ESP_LOGW(TAG, "Rejected STA SSID: must be 1-%d characters", (int)STA_SSID_MAXLEN);
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (strlen(password) > STA_PASS_MAXLEN) {
+        ESP_LOGW(TAG, "Rejected STA password: must be 0-%d characters", (int)STA_PASS_MAXLEN);
+        return ESP_ERR_INVALID_ARG;
+    }
+
     config_set_wifi_sta(ssid, password);
 
     // Ensure AP+STA mode so AP is available as fallback during connection
     if (s_status.mode != WIFI_MGR_MODE_AP_STA) {
         esp_wifi_stop();
-        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
+        esp_err_t err = esp_wifi_set_mode(WIFI_MODE_APSTA);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Could not enter AP+STA mode: %s", esp_err_to_name(err));
+            return err;
+        }
         s_status.mode = WIFI_MGR_MODE_AP_STA;
 
         app_config_t *conf = config_get();
@@ -307,16 +363,24 @@ esp_err_t wifi_manager_connect_sta(const char *ssid, const char *password)
         start_ap(ap_ssid, conf->ap_pass);
     }
 
-    wifi_config_t sta_config = {};
+    wifi_config_t sta_config = {0};
     strncpy((char *)sta_config.sta.ssid, ssid, sizeof(sta_config.sta.ssid));
     strncpy((char *)sta_config.sta.password, password, sizeof(sta_config.sta.password));
     sta_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
 
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_config));
+    esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &sta_config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "STA config rejected: %s", esp_err_to_name(err));
+        return err;
+    }
 
     s_retry_count = 0;
     xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
-    ESP_ERROR_CHECK(esp_wifi_start());
+    err = esp_wifi_start();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Could not start WiFi: %s", esp_err_to_name(err));
+        return err;
+    }
 
     ESP_LOGI(TAG, "Attempting STA connection to '%s'", ssid);
     return ESP_OK;
@@ -335,7 +399,11 @@ esp_err_t wifi_manager_disconnect_sta(void)
     // Switch to AP-only
     esp_wifi_disconnect();
     esp_wifi_stop();
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
+    esp_err_t err = esp_wifi_set_mode(WIFI_MODE_AP);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Could not switch to AP-only mode: %s", esp_err_to_name(err));
+        return err;
+    }
     s_status.mode = WIFI_MGR_MODE_AP;
     s_status.sta_connected = false;
     memset(s_status.sta_ip, 0, sizeof(s_status.sta_ip));
@@ -344,7 +412,11 @@ esp_err_t wifi_manager_disconnect_sta(void)
     char ap_ssid[33];
     build_ap_ssid(conf->ap_ssid, ap_ssid, sizeof(ap_ssid));
     start_ap(ap_ssid, conf->ap_pass);
-    ESP_ERROR_CHECK(esp_wifi_start());
+    err = esp_wifi_start();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Could not start WiFi: %s", esp_err_to_name(err));
+        return err;
+    }
 
     ESP_LOGI(TAG, "STA disconnected, switched to AP-only mode");
     return ESP_OK;
