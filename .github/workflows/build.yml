@@ -58,10 +58,12 @@ jobs:
           pattern: firmware-*
           merge-multiple: true
 
-      # Firmware ≤1.4.2 fetches releases/latest with an 8KB buffer, and each
-      # release asset adds ~1.75KB of JSON — keep the main release at 3 assets
-      # (app bins only) and publish factory images as a companion prerelease,
-      # which releases/latest excludes.
+      # Keep the main release at 3 assets (app bins only) and publish factory
+      # images as a companion prerelease, which releases/latest excludes.
+      # This no longer protects firmware ≤1.4.2, which reads releases/latest
+      # into an 8KB buffer: GitHub adds a per-asset digest field, so the
+      # response has measured ~8.2KB since v1.5.1 and those devices cannot
+      # check for updates at any asset count. See CLAUDE.md.
       - name: Create release
         uses: softprops/action-gh-release@v3
         with:

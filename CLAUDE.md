@@ -116,7 +116,9 @@ Pins are target-conditional (`#if CONFIG_IDF_TARGET_ESP32C3` in headers).
 - USB CDC-ACM: supports standard CDC, CH34x, CP210x, FTDI via VCP drivers; hot-plug with frontend notifications
 - Task watchdog: 10s timeout, panic (reboot) on hang
 - OTA rollback: firmware marked valid at end of app_main after all subsystems init
-- GitHub releases: keep the main release at 3 assets (app bins only) — firmware ≤1.4.2 fetches releases/latest with an 8KB buffer and each asset adds ~1.75KB of JSON; factory images go in the vX.Y.Z-factory companion prerelease
+- GitHub releases: keep the main release at 3 app bins; factory images go in the vX.Y.Z-factory companion prerelease, which stays out of
+  releases/latest. The old reason for the limit — firmware ≤1.4.2 reads releases/latest into an 8KB buffer — no longer holds: that response has
+  measured ~8.2KB since v1.5.1 (GitHub adds a per-asset `digest`), so ≤1.4.2 can't use Check-for-update at any asset count. Update those by uploading the .bin, or with tools/factory_flash.py
 - NTP: DHCP server discovery with pool.ntp.org fallback, optional manual override
 - Timezone: POSIX TZ string stored in NVS, applied via setenv("TZ")/tzset()
 - CORS: API responses set Access-Control-Allow-Origin: null and X-Content-Type-Options: nosniff
