@@ -25,6 +25,8 @@
 #endif
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "lwip/sockets.h"
+#include "lwip/inet.h"
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -315,6 +317,53 @@ static bool is_credential_key(const char *key)
            strcmp(key, "username") == 0;
 }
 
+/* Read a complete request body into buf, NUL-terminated.
+ *
+ * httpd_req_recv() is allowed to return fewer bytes than were asked for, so a
+ * body split across TCP segments arrives in pieces. Every caller below parses
+ * the result as JSON, where stopping at the first short read turns a perfectly
+ * valid request into "Invalid JSON" — randomly, and mostly under load. Returns
+ * the length read (0 for an absent body) or -1 if the body does not fit in
+ * buf_len or the connection failed.
+ */
+static int read_body(httpd_req_t *req, char *buf, size_t buf_len)
+{
+    if (req->content_len == 0) return 0;
+    if (req->content_len >= buf_len) return -1;
+
+    size_t remaining = req->content_len;
+    while (remaining > 0) {
+        int n = httpd_req_recv(req, buf, remaining);
+        if (n <= 0) return -1;  /* closed or failed connection, not a short read */
+        buf += n;
+        remaining -= n;
+    }
+    *buf = '\0';
+    return (int)req->content_len;
+}
+
+/* Peer address in presentation form, to key the per-host login counters.
+ * Returns NULL when it can't be determined — the caller then lands in the one
+ * shared bucket rather than in an unbounded number of them. */
+static const char *client_ip(httpd_req_t *req, char *out, size_t out_len)
+{
+    struct sockaddr_storage ss;
+    socklen_t ss_len = sizeof(ss);
+    if (getpeername(httpd_req_to_sockfd(req), (struct sockaddr *)&ss, &ss_len) != 0) {
+        return NULL;
+    }
+
+    if (ss.ss_family == AF_INET) {
+        return inet_ntop(AF_INET, &((const struct sockaddr_in *)&ss)->sin_addr, out, out_len);
+    }
+#if CONFIG_LWIP_IPV6
+    if (ss.ss_family == AF_INET6) {
+        return inet_ntop(AF_INET6, &((const struct sockaddr_in6 *)&ss)->sin6_addr, out, out_len);
+    }
+#endif
+    return NULL;
+}
+
 // --- Static file handlers ---
 
 static esp_err_t handle_root(httpd_req_t *req)
@@ -363,18 +412,17 @@ static esp_err_t handle_404(httpd_req_t *req, httpd_err_code_t err)
 
 static esp_err_t handle_login(httpd_req_t *req)
 {
-    if (auth_is_locked_out()) {
+    char ip[AUTH_IP_LEN];
+    const char *peer = client_ip(req, ip, sizeof(ip));
+
+    if (auth_is_locked_out(peer)) {
         return send_json_error(req, 429, "Too many failed attempts. Try again later.");
     }
 
-    if (req->content_len == 0 || req->content_len >= 256) {
-        return send_json_error(req, 400, "Invalid request size");
-    }
-
     char buf[256];
-    int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
-    if (len <= 0) return send_json_error(req, 400, "Empty request body");
-    buf[len] = '\0';
+    int len = read_body(req, buf, sizeof(buf));
+    if (len == 0) return send_json_error(req, 400, "Empty request body");
+    if (len < 0) return send_json_error(req, 400, "Invalid request size");
 
     cJSON *json = cJSON_Parse(buf);
     if (!json) return send_json_error(req, 400, "Invalid JSON");
@@ -387,7 +435,7 @@ static esp_err_t handle_login(httpd_req_t *req)
         return send_json_error(req, 400, "Missing username or password");
     }
 
-    char *token = auth_login(username->valuestring, password->valuestring);
+    char *token = auth_login(username->valuestring, password->valuestring, peer);
     cJSON_Delete(json);
 
     if (!token) return send_json_error(req, 401, "Invalid credentials");
@@ -574,14 +622,10 @@ static esp_err_t handle_config_post(httpd_req_t *req)
      * keeps it from being used to mutate anything else. */
     if (!require_auth(req)) return ESP_OK;
 
-    if (req->content_len == 0 || req->content_len >= 512) {
-        return send_json_error(req, 400, "Invalid request size");
-    }
-
     char buf[512];
-    int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
-    if (len <= 0) return send_json_error(req, 400, "Empty request body");
-    buf[len] = '\0';
+    int len = read_body(req, buf, sizeof(buf));
+    if (len == 0) return send_json_error(req, 400, "Empty request body");
+    if (len < 0) return send_json_error(req, 400, "Invalid request size");
 
     cJSON *json = cJSON_Parse(buf);
     if (!json) return send_json_error(req, 400, "Invalid JSON");
@@ -747,16 +791,14 @@ static esp_err_t handle_power(httpd_req_t *req)
     if (!require_auth(req)) return ESP_OK;
     if (!require_password_changed(req)) return ESP_OK;
 
-    if (req->content_len >= 128) {
-        return send_json_error(req, 400, "Invalid request size");
-    }
-
     char buf[128];
-    int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    int len = read_body(req, buf, sizeof(buf));
+    /* A body that failed to arrive is not the same as an absent one: no body is
+     * the documented way to ask for a toggle, a truncated one is an error. */
+    if (len < 0) return send_json_error(req, 400, "Invalid request size");
     esp_err_t err;
 
     if (len > 0) {
-        buf[len] = '\0';
         cJSON *json = cJSON_Parse(buf);
         if (json) {
             const cJSON *state = cJSON_GetObjectItem(json, "power");
@@ -890,12 +932,10 @@ static esp_err_t handle_tls_upload(httpd_req_t *req)
     char *buf = malloc(req->content_len + 1);
     if (!buf) return send_json_error(req, 400, "Out of memory");
 
-    int len = httpd_req_recv(req, buf, req->content_len);
-    if (len <= 0) {
+    if (read_body(req, buf, req->content_len + 1) <= 0) {
         free(buf);
         return send_json_error(req, 400, "Failed to read body");
     }
-    buf[len] = '\0';
 
     cJSON *json = cJSON_Parse(buf);
     free(buf);

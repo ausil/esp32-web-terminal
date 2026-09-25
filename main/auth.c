@@ -27,14 +27,56 @@ typedef struct {
 } session_t;
 
 static session_t s_sessions[AUTH_MAX_SESSIONS];
-static int s_failed_attempts = 0;
-static time_t s_lockout_until = 0;
+
+/* Failed-login counters are kept per address. A single global counter let anyone
+ * burn the five guesses and lock the real owner out for AUTH_LOCKOUT_S, from
+ * anywhere, with no credentials at all — the lockout was a denial-of-service
+ * button pointed at the person trying to log in. */
+typedef struct {
+    bool used;
+    char ip[AUTH_IP_LEN];
+    int failed_attempts;
+    time_t lockout_until;
+} host_t;
+
+static host_t s_hosts[AUTH_TRACKED_HOSTS];
+
+/* Looks up an address's counter; claims a slot when create is set. The table is
+ * small and fixed on purpose — the server holds four sockets — so when it fills
+ * the entry whose lockout lapsed longest ago is recycled. That can drop a count
+ * early, which is the direction that costs the attacker's protection rather than
+ * an honest user's access. */
+static host_t *host_entry(const char *ip, bool create)
+{
+    const char *key = ip ? ip : "";
+    host_t *free_slot = NULL;
+    host_t *stalest = NULL;
+
+    for (int i = 0; i < AUTH_TRACKED_HOSTS; i++) {
+        host_t *h = &s_hosts[i];
+        if (h->used && strcmp(h->ip, key) == 0) return h;
+        if (!h->used) {
+            if (!free_slot) free_slot = h;
+            continue;
+        }
+        if (!stalest || h->lockout_until < stalest->lockout_until) stalest = h;
+    }
+
+    if (!create) return NULL;
+
+    host_t *h = free_slot ? free_slot : stalest;
+    h->used = true;
+    h->failed_attempts = 0;
+    h->lockout_until = 0;
+    strncpy(h->ip, key, AUTH_IP_LEN - 1);
+    h->ip[AUTH_IP_LEN - 1] = '\0';
+    return h;
+}
 
 esp_err_t auth_init(void)
 {
     memset(s_sessions, 0, sizeof(s_sessions));
-    s_failed_attempts = 0;
-    s_lockout_until = 0;
+    memset(s_hosts, 0, sizeof(s_hosts));
     ESP_LOGI(TAG, "Auth initialized");
     return ESP_OK;
 }
@@ -49,39 +91,51 @@ static void generate_token(char *buf, size_t buf_len)
     buf[AUTH_SESSION_TOKEN_LEN * 2] = '\0';
 }
 
-bool auth_is_locked_out(void)
+bool auth_is_locked_out(const char *client_ip)
 {
-    if (s_lockout_until == 0) return false;
-    time_t now = mono_now();
-    if (now >= s_lockout_until) {
-        s_lockout_until = 0;
-        s_failed_attempts = 0;
+    host_t *h = host_entry(client_ip, false);
+    if (!h || h->lockout_until == 0) return false;
+
+    if (mono_now() >= h->lockout_until) {
+        h->lockout_until = 0;
+        h->failed_attempts = 0;
         return false;
     }
     return true;
 }
 
-char *auth_login(const char *username, const char *password)
+char *auth_login(const char *username, const char *password, const char *client_ip)
 {
-    if (auth_is_locked_out()) {
-        ESP_LOGW(TAG, "Login attempt during lockout");
+    if (auth_is_locked_out(client_ip)) {
+        ESP_LOGW(TAG, "Login attempt from %s during lockout",
+                 client_ip ? client_ip : "unknown address");
         return NULL;
     }
 
     app_config_t *conf = config_get();
 
     if (strcmp(username, conf->auth_user) != 0 || !config_check_password(password)) {
-        s_failed_attempts++;
-        ESP_LOGW(TAG, "Login failed for user '%s' (attempt %d/%d)", username, s_failed_attempts, AUTH_MAX_FAILED);
-        if (s_failed_attempts >= AUTH_MAX_FAILED) {
-            s_lockout_until = mono_now() + AUTH_LOCKOUT_S;
-            ESP_LOGW(TAG, "Account locked out for %d seconds", AUTH_LOCKOUT_S);
+        host_t *h = host_entry(client_ip, true);
+        if (h) {
+            h->failed_attempts++;
+            ESP_LOGW(TAG, "Login failed for user '%s' from %s (attempt %d/%d)",
+                     username, client_ip ? client_ip : "unknown address",
+                     h->failed_attempts, AUTH_MAX_FAILED);
+            if (h->failed_attempts >= AUTH_MAX_FAILED) {
+                h->lockout_until = mono_now() + AUTH_LOCKOUT_S;
+                ESP_LOGW(TAG, "Locked out %s for %d seconds",
+                         client_ip ? client_ip : "unknown address", AUTH_LOCKOUT_S);
+            }
         }
         return NULL;
     }
 
-    // Success — reset failed attempts
-    s_failed_attempts = 0;
+    // Success — this address is trustworthy again
+    host_t *ok = host_entry(client_ip, false);
+    if (ok) {
+        ok->failed_attempts = 0;
+        ok->lockout_until = 0;
+    }
 
     // Find free session slot (or evict oldest)
     int slot = -1;
