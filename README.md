@@ -10,7 +10,7 @@ Supported boards: **ESP32-C6-DevKitC-1** (8MB), **ESP32-C3 Super Mini** (4MB), a
 - **WiFi connectivity** — connect via your existing WiFi network (STA mode) or the ESP32's own access point (AP mode)
 - **Smart WiFi management** — AP disabled when STA is connected; auto-fallback to AP if STA drops; reconnect watchdog retries every 30s
 - **HTTPS + WebSocket** — TLS encrypted using a self-signed ECC P-256 certificate
-- **Authentication** — session-based login with salted SHA-256 password hashing, rate limiting, and automatic lockout
+- **Authentication** — session-based login with PBKDF2-HMAC-SHA256 password hashing, rate limiting, and automatic lockout
 - **Remote power control** — reset or power-cycle your SBC via GPIO-driven relay/MOSFET
 - **Multi-port serial** — UART and USB CDC-ACM host support (ESP32-S3); switch between ports from the toolbar
 - **USB-to-serial support** — connect to SBCs that expose their console via USB (EspressoBin, etc.) using standard CDC-ACM, CH34x, CP210x, or FTDI adapters (ESP32-S3)
@@ -121,9 +121,9 @@ run `tools/factory_flash.py --help` and see the script header for the format
    - **Username:** `admin`
    - **Password:** `admin`
 
-4. You'll be prompted to change the default password on first login. Until you do, the device is locked: the terminal, GPIO controls, OTA updates and settings changes all refuse with `403`, and a banner points you at the password field.
+4. **Change the default password** when prompted. Until you do, the device is locked: the terminal, GPIO controls, OTA updates and all settings writes refuse with `403`, and a banner points you at the password field. The new password must be at least 8 characters.
 
-5. Open **Settings** to configure your device name, WiFi network, and timezone.
+5. Open **Settings** to configure your device name, WiFi network, and timezone. This only works after step 4 — configuring WiFi is a settings write, so it is locked behind the password change.
 
 Once WiFi is configured, the AP is disabled and the device is accessible at `https://<device-name>.local` or its DHCP-assigned IP.
 
@@ -168,44 +168,56 @@ Upload new firmware via **Settings > Firmware Update**. The device reboots after
 
 ## REST API
 
-All API endpoints require authentication via session cookie (obtained from `/api/login`). While the factory `admin`/`admin` password is still in place, every endpoint except `GET /api/config` and `GET /api/sysinfo` returns `403 Forbidden`.
+All API endpoints except `/api/login` and `/api/logout` require authentication via session cookie (obtained from `/api/login`). While the factory `admin`/`admin` password is still in place, `GET /api/config` and `GET /api/sysinfo` are the only other endpoints that respond — everything else returns `403 Forbidden`, and `POST /api/config` accepts nothing but the password/username change.
 
-| Method | Endpoint       | Description                          | Body                                             |
-|--------|---------------|--------------------------------------|--------------------------------------------------|
-| POST   | `/api/login`   | Authenticate, returns session token  | `{"username": "...", "password": "..."}`         |
-| POST   | `/api/logout`  | Invalidate session                   | —                                                |
-| GET    | `/api/config`  | Get current configuration            | —                                                |
-| POST   | `/api/config`  | Update configuration                 | JSON with fields below                           |
-| POST   | `/api/reset`   | Trigger SBC reset via GPIO           | —                                                |
-| POST   | `/api/power`   | Toggle or set SBC power              | `{"power": true}` or empty for toggle            |
-| POST   | `/api/ota`     | Upload firmware binary               | Raw binary body                                  |
-| GET    | `/api/sysinfo` | System info (chip, heap, uptime)     | —                                                |
-| GET    | `/ws`          | WebSocket for terminal data          | Binary frames; `?port=N` to select serial port   |
+| Method | Endpoint          | Description                          | Body                                             |
+|--------|-------------------|--------------------------------------|--------------------------------------------------|
+| POST   | `/api/login`      | Authenticate, returns session token  | `{"username": "...", "password": "..."}`         |
+| POST   | `/api/logout`     | Invalidate session                   | —                                                |
+| GET    | `/api/token`      | Re-issue a token for a cookie session, for WebSocket auth | —                |
+| GET    | `/api/config`     | Get current configuration            | —                                                |
+| POST   | `/api/config`     | Update configuration                 | JSON with fields below                           |
+| POST   | `/api/reset`      | Trigger SBC reset via GPIO           | —                                                |
+| POST   | `/api/power`      | Toggle or set SBC power              | `{"power": true}` or empty for toggle            |
+| GET    | `/api/sysinfo`    | System info (chip, heap, uptime)     | —                                                |
+| GET    | `/api/wifi/scan`  | Scan for nearby networks             | —                                                |
+| GET    | `/api/ota/check`  | Check GitHub for a newer firmware    | —                                                |
+| POST   | `/api/ota`        | Upload firmware binary               | Raw binary body                                  |
+| POST   | `/api/ota/github` | Download and install from GitHub     | —                                                |
+| POST   | `/api/tls`        | Replace the TLS certificate/keypair  | `{"cert": "PEM", "key": "PEM"}`                  |
+| POST   | `/api/reboot`     | Reboot the ESP32                     | —                                                |
+| GET    | `/ws`             | WebSocket for terminal data          | Binary frames; `?port=N` to select serial port   |
 
 ### Config Fields
 
-All fields are optional in POST requests; include only what you want to change:
+Include only the fields you want to change. Two exceptions: `sta_ssid`/`sta_pass` and
+`ap_ssid`/`ap_pass` are read as pairs — sending only one of them is ignored, so resend the
+other unchanged.
 
-| Field             | Type    | Description                    |
-|-------------------|---------|--------------------------------|
-| `baud_rate`       | number  | Serial baud rate               |
-| `port`            | number  | Target port index (default 0)  |
-| `sta_ssid`        | string  | WiFi network SSID              |
-| `sta_pass`        | string  | WiFi network password          |
-| `new_password`    | string  | New login password             |
-| `device_name`     | string  | Device identifier              |
-| `ntp_server`      | string  | NTP server (empty = use DHCP)  |
-| `timezone`        | string  | POSIX TZ string (e.g., `EST5EDT,M3.2.0,M11.1.0`) |
-| `wifi_disconnect` | boolean | Disconnect STA, switch to AP   |
-| `power_on_default`| boolean | Power on SBC at boot           |
+| Field              | Type    | Description                    |
+|--------------------|---------|--------------------------------|
+| `baud_rate`        | number  | Serial baud rate (9600–1,500,000, standard rates only) |
+| `port`             | number  | Port `baud_rate` applies to (default 0) |
+| `sta_ssid`         | string  | WiFi network SSID (send with `sta_pass`) |
+| `sta_pass`         | string  | WiFi network password (send with `sta_ssid`) |
+| `ap_ssid`          | string  | Access point name, 1–27 chars; a `-XXXX` MAC suffix is appended (send with `ap_pass`) |
+| `ap_pass`          | string  | Access point password, 8+ chars, or empty for an open AP (send with `ap_ssid`) |
+| `username`         | string  | New login username, 1–32 chars (with `new_password`) |
+| `current_password` | string  | Existing password, required to change credentials |
+| `new_password`     | string  | New login password, 8+ chars   |
+| `device_name`      | string  | Device identifier              |
+| `ntp_server`       | string  | NTP server (empty = use DHCP)  |
+| `timezone`         | string  | POSIX TZ string (e.g., `EST5EDT,M3.2.0,M11.1.0`) |
+| `wifi_disconnect`  | boolean | Disconnect STA, switch to AP   |
+| `power_on_default` | boolean | Power on SBC at boot           |
 
 ## Security
 
 - **TLS** — all HTTP and WebSocket traffic encrypted with a self-signed ECC P-256 certificate embedded in firmware
 - **Authentication** — PBKDF2-HMAC-SHA256 (10,000 iterations) with a per-device random salt, stored in NVS; plain-text passwords are never stored
 - **Session management** — up to 4 concurrent sessions with 1-hour timeout, using 32-byte random tokens
-- **Rate limiting** — 5 failed login attempts triggers a 5-minute lockout
-- **Default credentials** — `admin`/`admin`, and the change is **enforced server-side**: until the password is replaced, the terminal WebSocket, GPIO, OTA, TLS upload, WiFi scan and all settings mutations return `403`, so the device is reachable but inert. Only `GET /api/config` and `GET /api/sysinfo` respond, and the UI shows a banner explaining the lock. Minimum new-password length is 8 characters, checked by the firmware rather than the page
+- **Rate limiting** — 5 failed login attempts triggers a 5-minute lockout. The counter is device-wide rather than per-client, so an attacker who knows this can lock the real owner out for 5 minutes at will
+- **Default credentials** — `admin`/`admin`, and the change is **enforced server-side**: until the password is replaced, the terminal WebSocket, token mint, GPIO, OTA, TLS upload, ESP reboot, WiFi scan and all settings mutations return `403`, so the device is reachable but inert. Only `GET /api/config` and `GET /api/sysinfo` respond besides login/logout, and the UI shows a banner explaining the lock. Minimum new-password length is 8 characters, checked by the firmware rather than the page
 - **CORS** — API responses restrict cross-origin access
 - **Paste throttling** — large pastes chunked (64 bytes / 10ms) to prevent UART buffer overflow
 - **Navigation guard** — browser warns before closing an active terminal session
@@ -219,18 +231,24 @@ main/
   main.c            Entry point, NTP init, OTA verification
   config.c/h        NVS persistent configuration
   wifi_manager.c/h  AP + STA WiFi, mDNS, reconnect watchdog
-  auth.c/h          Session auth, salted SHA-256, rate limiting
+  auth.c/h          Session auth, PBKDF2-HMAC-SHA256, rate limiting
   serial_port.c/h   Port abstraction (UART + USB CDC-ACM)
   uart_bridge.c/h   UART backend for serial port layer
   usb_cdc_bridge.c/h USB Host CDC-ACM backend (ESP32-S3 only)
   web_server.c/h    HTTPS server, REST API, WebSocket, OTA
+  ota_github.c/h    GitHub release check and firmware download
   gpio_control.c/h  SBC reset and power control
 frontend/
-  index.html        Single-page terminal UI (all CSS/JS inlined)
-  terminal.js       WebSocket client, login flow, toolbar (reference)
-  style.css         Dark theme styling (reference)
+  index.html        Single-page terminal UI (all CSS/JS inlined) — the only served copy
+  terminal.js       WebSocket client, login flow, toolbar (reference, not served)
+  style.css         Dark theme styling (reference, not served)
+hardware/
+  DESIGN.md         C6 HAT PCB design
+  WIRING-C3-MINI.md C3 Super Mini wiring guide
 certs/
   generate_cert.sh  Generates self-signed ECC P-256 cert
+tools/
+  factory_flash.py  Flash a release factory image without an ESP-IDF install
 ```
 
 ## Contributing

@@ -1,6 +1,10 @@
 /* SPDX-License-Identifier: MIT */
 /* Copyright (c) 2026 Dennis Gilmore */
 
+/* NOT BUILT, NOT SERVED. The firmware serves frontend/index.html, which inlines
+ * its own stylesheet. This file lags index.html; read it for structure only and
+ * take actual styling from index.html. */
+
 *, *::before, *::after {
     box-sizing: border-box;
     margin: 0;

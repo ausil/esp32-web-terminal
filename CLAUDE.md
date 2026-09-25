@@ -41,14 +41,18 @@ main/
   uart_bridge.c/h   - UART1 ↔ WebSocket bridge, configurable baud (pins vary by target)
   usb_cdc_bridge.c/h - USB Host CDC-ACM bridge (ESP32-S3 only), hot-plug, VCP drivers
   web_server.c/h    - HTTPS server, REST API, WebSocket (per-port routing), OTA, sysinfo
+  ota_github.c/h    - GitHub release check + firmware download over HTTPS
   gpio_control.c/h  - SBC reset and power control (pins vary by target)
 hardware/
   DESIGN.md         - C6 HAT PCB design
   WIRING-C3-MINI.md - C3 Super Mini wiring guide
 frontend/
-  index.html        - Single-page terminal UI (all CSS, app JS, FitAddon inlined)
-  terminal.js       - WebSocket client, login, toolbar controls (reference copy)
-  style.css         - Dark theme styling (reference copy)
+  index.html        - Single-page terminal UI (all CSS, app JS, FitAddon inlined).
+                      THE ONLY SERVED COPY - behaviour changes go here
+  terminal.js       - WebSocket client, login, toolbar controls (reference copy: not
+                      embedded, not served, lags index.html - never edit this expecting effect)
+  style.css         - Dark theme styling (reference copy: same caveats as terminal.js)
+  lib/xterm.min.js.gz - Served pre-gzipped via EMBED_FILES
 certs/
   generate_cert.sh  - Generates self-signed ECC P-256 cert for TLS
 tools/
@@ -62,12 +66,17 @@ tools/
 
 - `POST /api/login` — authenticate, returns session token
 - `POST /api/logout` — invalidate session
-- `GET /api/config` — current config (baud, WiFi, power, device name, NTP status, ports array)
-- `POST /api/config` — update config (baud_rate, port, sta_ssid/sta_pass, new_password, device_name, ntp_server, timezone, wifi_disconnect, power_on_default)
+- `GET /api/token` — re-issue a token for a cookie-authenticated session (used for WebSocket auth)
+- `GET /api/config` — current config (baud, WiFi, power, device name, NTP status, `auth_initialized`, ports array)
+- `POST /api/config` — update config (baud_rate/port, ap_ssid+ap_pass, sta_ssid+sta_pass, new_password+current_password+username, device_name, ntp_server, timezone, wifi_disconnect, power_on_default). WiFi/AP credentials are read as pairs; a lone half of a pair is ignored
 - `POST /api/reset` — trigger SBC reset via GPIO
-- `POST /api/power` — toggle SBC power via GPIO
-- `POST /api/ota` — upload firmware binary for OTA update
+- `POST /api/power` — toggle SBC power via GPIO (`{"power": bool}` to set explicitly)
 - `GET /api/sysinfo` — system info (chip, firmware, heap, uptime)
+- `GET /api/wifi/scan` — scan for nearby networks
+- `GET /api/ota/check` / `POST /api/ota/github` — check for / install a GitHub release
+- `POST /api/ota` — upload firmware binary for OTA update
+- `POST /api/tls` — replace TLS cert+key (`{"cert": PEM, "key": PEM}`)
+- `POST /api/reboot` — reboot the ESP32
 - `GET /ws` — WebSocket for terminal data (requires auth cookie or ?token= query param, optional ?port=N for multi-port)
 
 ## Pin Assignments

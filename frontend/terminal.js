@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Dennis Gilmore
 
+// NOT BUILT, NOT SERVED. The firmware serves frontend/index.html, which inlines
+// its own copy of this logic; nothing here is compiled into a binary. This file
+// lags index.html and is known to be wrong in places (it still permits a 4-char
+// password and has no setup-lock handling), so read it for structure only and
+// take behaviour from index.html.
+
 (function() {
     "use strict";
 
