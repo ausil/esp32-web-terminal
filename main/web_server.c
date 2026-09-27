@@ -498,10 +498,30 @@ static esp_err_t handle_xterm_js(httpd_req_t *req)
 
 // --- Captive portal 404 ---
 
+/* Redirect to the address the client actually reached us on. Hardcoding
+ * 192.168.4.1 is dead in STA-only mode (the AP netif is gone); the Host header
+ * works in every mode — on the AP it's the 192.168.4.1 request the captive
+ * portal expects, on a LAN it's the STA IP or <name>.local the browser typed. */
 static esp_err_t handle_404(httpd_req_t *req, httpd_err_code_t err)
 {
+    char location[160] = "https://192.168.4.1/";
+
+    size_t host_len = httpd_req_get_hdr_value_len(req, "Host");
+    if (host_len > 0 && host_len < sizeof(location) - 16) {
+        char host[128];
+        if (httpd_req_get_hdr_value_str(req, "Host", host, sizeof(host)) == ESP_OK) {
+            /* Strip any port the client echoed; we only listen on 443 */
+            char *port = host[0] == '[' ? strchr(host, ']') : NULL;
+            port = port ? strchr(port, ':') : strchr(host, ':');
+            if (port) *port = '\0';
+            if (host[0] != '\0') {
+                snprintf(location, sizeof(location), "https://%s/", host);
+            }
+        }
+    }
+
     httpd_resp_set_status(req, "302 Found");
-    httpd_resp_set_hdr(req, "Location", "https://192.168.4.1/");
+    httpd_resp_set_hdr(req, "Location", location);
     return httpd_resp_send(req, NULL, 0);
 }
 
