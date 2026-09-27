@@ -553,6 +553,10 @@ int wifi_manager_scan(wifi_scan_result_t **results)
     }
 
     esp_wifi_scan_get_ap_records(&ap_count, ap_records);
+    /* The driver keeps the scan result list allocated until cleared; every
+     * other exit path from a scan does, and this one must too or the memory
+     * stays pinned until the next scan */
+    esp_wifi_clear_ap_list();
 
     // Deduplicate by SSID, keeping strongest signal
     wifi_scan_result_t *res = malloc(sizeof(wifi_scan_result_t) * ap_count);
