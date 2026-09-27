@@ -32,7 +32,10 @@ static wifi_manager_status_t s_status;
 static esp_netif_t *s_sta_netif = NULL;
 static esp_netif_t *s_ap_netif = NULL;
 static TimerHandle_t s_reconnect_timer = NULL;
-static bool s_scanning = false;  // suppress disconnect handling during scan
+/* Written by the httpd task around wifi_manager_scan(), read from the WiFi
+ * event handler on the system event task — volatile so the compiler doesn't
+ * cache it in a register across the delays in the scan path. */
+static volatile bool s_scanning = false;  // suppress disconnect handling during scan
 
 #define RECONNECT_INTERVAL_MS  30000  // Retry STA every 30s when on AP fallback
 
