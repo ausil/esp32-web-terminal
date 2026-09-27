@@ -14,9 +14,7 @@ static const char *TAG = "uart_bridge";
 // UART1 is the only UART bridge instance on all targets
 #define UART_BRIDGE_PORT  UART_NUM_1
 
-static uint32_t s_baud_rate = 115200;
 static TaskHandle_t s_rx_task_handle = NULL;
-static int s_port_index = 0;
 
 static void uart_rx_task(void *arg)
 {
@@ -33,8 +31,7 @@ static void uart_rx_task(void *arg)
 
 esp_err_t uart_bridge_init(int port_index, uint32_t baud_rate)
 {
-    s_baud_rate = baud_rate;
-    s_port_index = port_index;
+    (void)port_index;  // UART1 is the only UART instance on every target
 
     uart_config_t uart_config = {
         .baud_rate = (int)baud_rate,
@@ -60,7 +57,6 @@ esp_err_t uart_bridge_set_baud_rate(int port_index, uint32_t baud_rate)
 {
     esp_err_t err = uart_set_baudrate(UART_BRIDGE_PORT, baud_rate);
     if (err == ESP_OK) {
-        s_baud_rate = baud_rate;
         ESP_LOGI(TAG, "Baud rate changed to %lu", baud_rate);
     } else {
         ESP_LOGE(TAG, "Failed to set baud rate: %s", esp_err_to_name(err));

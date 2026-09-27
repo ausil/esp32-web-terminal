@@ -20,7 +20,6 @@
 #endif
 
 #define UART_BRIDGE_BUF_SIZE    (1024)     // UART driver RX buffer
-#define UART_BRIDGE_RX_RING_SIZE (8192)    // Ring buffer for WebSocket TX
 
 // serial_port vtable functions (port_index maps to UART instance)
 esp_err_t uart_bridge_init(int port_index, uint32_t baud_rate);
