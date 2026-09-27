@@ -8,6 +8,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "usb/usb_host.h"
 #include "usb/cdc_acm_host.h"
 #include "usb/vcp_ch34x.h"
@@ -25,6 +26,14 @@ static cdc_acm_dev_hdl_t s_cdc_dev = NULL;
 static QueueHandle_t s_event_queue = NULL;
 static TaskHandle_t s_usb_lib_task = NULL;
 static TaskHandle_t s_event_task = NULL;
+
+/* Guards s_cdc_dev. The handle is closed and freed by usb_event_task on
+ * disconnect, while usb_cdc_send()/usb_cdc_set_baud_rate() read and use it on
+ * the httpd task — without this, a hot-unplug landing between the NULL check
+ * and the TX call would hand cdc_acm_host a freed device handle. Only ever
+ * held across short operations; the blocking open_device() call runs without
+ * it while s_cdc_dev is still NULL. */
+static SemaphoreHandle_t s_cdc_mutex = NULL;
 
 typedef struct {
     enum {
@@ -179,7 +188,9 @@ static void usb_event_task(void *arg)
                 ESP_LOGW(TAG, "Failed to set control line state: %s", esp_err_to_name(err));
             }
 
+            xSemaphoreTake(s_cdc_mutex, portMAX_DELAY);
             s_cdc_dev = dev;
+            xSemaphoreGive(s_cdc_mutex);
 
             // Update port availability
             serial_port_t *sp = (serial_port_t *)serial_port_get(s_port_index);
@@ -192,10 +203,12 @@ static void usb_event_task(void *arg)
 
         case USB_EVT_DISCONNECTED: {
             ESP_LOGI(TAG, "USB CDC device disconnected");
+            xSemaphoreTake(s_cdc_mutex, portMAX_DELAY);
             if (s_cdc_dev) {
                 cdc_acm_host_close(s_cdc_dev);
                 s_cdc_dev = NULL;
             }
+            xSemaphoreGive(s_cdc_mutex);
 
             serial_port_t *sp = (serial_port_t *)serial_port_get(s_port_index);
             if (sp) sp->available = false;
@@ -217,6 +230,13 @@ esp_err_t usb_cdc_init(int port_index, uint32_t baud_rate)
     s_event_queue = xQueueCreate(5, sizeof(usb_event_t));
     if (!s_event_queue) return ESP_ERR_NO_MEM;
 
+    s_cdc_mutex = xSemaphoreCreateMutex();
+    if (!s_cdc_mutex) {
+        vQueueDelete(s_event_queue);
+        s_event_queue = NULL;
+        return ESP_ERR_NO_MEM;
+    }
+
     ESP_LOGI(TAG, "USB CDC bridge initialized (port %d, baud=%lu)", port_index, baud_rate);
     return ESP_OK;
 }
@@ -228,8 +248,13 @@ esp_err_t usb_cdc_start(int port_index)
                                   xTaskGetCurrentTaskHandle(), USB_HOST_PRIORITY, &s_usb_lib_task);
     if (ret != pdPASS) return ESP_FAIL;
 
-    // Wait for USB host + CDC-ACM driver to be installed
-    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));
+    // Wait for USB host + CDC-ACM driver to be installed. If the library task
+    // never signals (install hung or failed), don't start the event task — it
+    // would sit consuming connection events for a host stack that isn't there.
+    if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000)) == 0) {
+        ESP_LOGE(TAG, "USB host library failed to install");
+        return ESP_FAIL;
+    }
 
     // Start event processing task
     ret = xTaskCreate(usb_event_task, "usb_evt", 4096, NULL, 10, &s_event_task);
@@ -241,14 +266,25 @@ esp_err_t usb_cdc_start(int port_index)
 
 esp_err_t usb_cdc_send(int port_index, const uint8_t *data, size_t len)
 {
-    if (!s_cdc_dev) return ESP_ERR_INVALID_STATE;
-    return cdc_acm_host_data_tx_blocking(s_cdc_dev, data, len, TX_TIMEOUT_MS);
+    xSemaphoreTake(s_cdc_mutex, portMAX_DELAY);
+    if (!s_cdc_dev) {
+        xSemaphoreGive(s_cdc_mutex);
+        return ESP_ERR_INVALID_STATE;
+    }
+    /* The mutex is held across a blocking TX (up to TX_TIMEOUT_MS): close is
+     * blocked until the in-flight write finishes, which is exactly what keeps
+     * the handle alive under cdc_acm_host_data_tx_blocking(). The 1s cap means
+     * a stalled device can at most delay the disconnect event by that much. */
+    esp_err_t err = cdc_acm_host_data_tx_blocking(s_cdc_dev, data, len, TX_TIMEOUT_MS);
+    xSemaphoreGive(s_cdc_mutex);
+    return err;
 }
 
 esp_err_t usb_cdc_set_baud_rate(int port_index, uint32_t baud_rate)
 {
     s_baud_rate = baud_rate;
 
+    xSemaphoreTake(s_cdc_mutex, portMAX_DELAY);
     if (s_cdc_dev) {
         cdc_acm_line_coding_t coding = {
             .dwDTERate = baud_rate,
@@ -257,10 +293,13 @@ esp_err_t usb_cdc_set_baud_rate(int port_index, uint32_t baud_rate)
             .bDataBits = 8,
         };
         esp_err_t err = cdc_acm_host_line_coding_set(s_cdc_dev, &coding);
+        xSemaphoreGive(s_cdc_mutex);
         if (err != ESP_OK && err != ESP_ERR_NOT_SUPPORTED) {
             ESP_LOGE(TAG, "Failed to set baud rate: %s", esp_err_to_name(err));
             return err;
         }
+    } else {
+        xSemaphoreGive(s_cdc_mutex);
     }
 
     ESP_LOGI(TAG, "Baud rate set to %lu", baud_rate);
@@ -269,5 +308,9 @@ esp_err_t usb_cdc_set_baud_rate(int port_index, uint32_t baud_rate)
 
 bool usb_cdc_is_connected(void)
 {
-    return s_cdc_dev != NULL;
+    bool connected;
+    xSemaphoreTake(s_cdc_mutex, portMAX_DELAY);
+    connected = (s_cdc_dev != NULL);
+    xSemaphoreGive(s_cdc_mutex);
+    return connected;
 }
