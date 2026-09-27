@@ -916,16 +916,20 @@ static esp_err_t handle_power(httpd_req_t *req)
     esp_err_t err;
 
     if (len > 0) {
+        /* A present body must actually say what to do with the relay. Falling
+         * through to toggle() on unparseable JSON or a missing power key would
+         * flip a physical relay in response to a request that asked for
+         * something else (or nothing parseable at all). */
         cJSON *json = cJSON_Parse(buf);
-        if (json) {
-            const cJSON *state = cJSON_GetObjectItem(json, "power");
-            if (cJSON_IsBool(state)) {
-                err = cJSON_IsTrue(state) ? gpio_sbc_power_on() : gpio_sbc_power_off();
-                cJSON_Delete(json);
-                goto respond;
-            }
+        if (!json) return send_json_error(req, 400, "Invalid JSON");
+        const cJSON *state = cJSON_GetObjectItem(json, "power");
+        if (!cJSON_IsBool(state)) {
             cJSON_Delete(json);
+            return send_json_error(req, 400, "power must be a boolean");
         }
+        err = cJSON_IsTrue(state) ? gpio_sbc_power_on() : gpio_sbc_power_off();
+        cJSON_Delete(json);
+        goto respond;
     }
 
     err = gpio_sbc_power_toggle();
