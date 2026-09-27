@@ -20,6 +20,32 @@ static time_t mono_now(void)
     return (time_t)(esp_timer_get_time() / 1000000);
 }
 
+/* Value of "name=" as its own cookie name inside a Cookie header, or NULL if
+ * absent. A bare strstr() also matched names that merely end with the target
+ * ("xsession=..." was read as "session=..."), so scan for each occurrence and
+ * accept only one that starts the header or follows a "; " separator. */
+static const char *cookie_value(const char *header, const char *name, size_t *out_len)
+{
+    size_t name_len = strlen(name);
+    const char *p = header;
+
+    while ((p = strstr(p, name)) != NULL) {
+        bool at_start = (p == header);
+        bool after_sep = (p >= header + 2 && p[-1] == ' ' && p[-2] == ';');
+        if (at_start || after_sep) {
+            p += name_len;
+            if (*p == '=') {
+                p++;
+                const char *end = strchr(p, ';');
+                *out_len = end ? (size_t)(end - p) : strlen(p);
+                return p;
+            }
+        }
+        p += name_len;
+    }
+    return NULL;
+}
+
 typedef struct {
     char token[AUTH_SESSION_TOKEN_LEN * 2 + 1]; // hex string
     time_t created;
@@ -216,12 +242,9 @@ char *auth_get_token_from_request(httpd_req_t *req)
     if (cookie_len > 0) {
         char *cookie = malloc(cookie_len + 1);
         if (cookie && httpd_req_get_hdr_value_str(req, "Cookie", cookie, cookie_len + 1) == ESP_OK) {
-            // Look for session=<token>
-            char *session_start = strstr(cookie, "session=");
-            if (session_start) {
-                session_start += 8; // skip "session="
-                char *session_end = strchr(session_start, ';');
-                size_t token_len = session_end ? (size_t)(session_end - session_start) : strlen(session_start);
+            size_t token_len = 0;
+            const char *session_start = cookie_value(cookie, "session", &token_len);
+            if (session_start && token_len > 0) {
                 char *token = malloc(token_len + 1);
                 if (token) {
                     memcpy(token, session_start, token_len);
