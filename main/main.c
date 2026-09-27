@@ -15,9 +15,10 @@
 
 static const char *TAG = "main";
 
-// NTP status — exposed via web_server
+// NTP status — exposed via web_server. The bool is set from the SNTP callback
+// task and read from the httpd task, so it must not be cached in a register.
 static char s_ntp_server[80] = "";
-static bool s_ntp_synced = false;
+static volatile bool s_ntp_synced = false;
 
 const char *ntp_get_server(void) { return s_ntp_server; }
 bool ntp_is_synced(void) { return s_ntp_synced; }
