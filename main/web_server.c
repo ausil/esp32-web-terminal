@@ -25,6 +25,7 @@
 #endif
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "lwip/sockets.h"
 #include "lwip/inet.h"
 #include <string.h>
@@ -132,6 +133,40 @@ typedef struct {
 static ws_client_t s_ws_clients[MAX_WS_CLIENTS];
 static SemaphoreHandle_t s_ws_mutex = NULL;
 
+/* --- Serial→WS TX ring ---
+ *
+ * Every WS frame is sent from the httpd task. esp_http_server is only
+ * thread-safe for websocket sends from its own task: httpd_ws_send_frame_async()
+ * looks the session up and writes it with no lock against the httpd task's
+ * close/LRU-purge path, so a send from uart_rx_task/usb_event_task can target
+ * a freed session, or a socket number already recycled for another client —
+ * bytes then land in someone else's TLS session. Direct sends also let one
+ * stalled WS client wedge the shared UART RX task behind a blocking write.
+ *
+ * Producers (UART/USB tasks) memcpy into a fixed ring and post a wake-up with
+ * httpd_queue_work(); ws_flush_work() drains the ring on the httpd task, where
+ * sends and session teardown are naturally serialized. If the httpd task is
+ * busy (an OTA upload blocks it for the whole transfer), the ring absorbs the
+ * backlog and then drops with a counter — losing serial output is bad,
+ * hanging the device or corrupting another client's stream is worse. */
+#define WS_TX_SLOTS    32                    /* power of two */
+#define WS_TX_SLOT_MAX 256                   /* matches uart_rx_task chunk size */
+
+typedef struct {
+    uint16_t len;
+    int16_t port;             /* -1 = text event, sent to every client */
+    uint8_t data[WS_TX_SLOT_MAX];
+} ws_tx_slot_t;
+
+static ws_tx_slot_t s_ws_tx_ring[WS_TX_SLOTS];
+static uint32_t s_tx_head;    /* producer index (UART/USB tasks) */
+static uint32_t s_tx_tail;    /* consumer index (httpd task) */
+static bool s_tx_kick_pending;
+static uint32_t s_tx_dropped;
+static portMUX_TYPE s_tx_mux = portMUX_INITIALIZER_UNLOCKED;
+
+static void ws_flush_work(void *arg);
+
 /* Bounded and always NUL-terminated, since the copy is later handed to
  * auth_validate_session() as a C string. strlcpy is deliberately not used — it
  * isn't available on every libc IDF builds against. */
@@ -192,6 +227,8 @@ static void ws_revalidate_locked(void)
 void web_server_ws_close_all(const char *why)
 {
     if (!s_server || !s_ws_mutex) return;
+    /* Eviction sends a close frame, which is only safe on the httpd task —
+     * this runs in handlers, which are on the httpd task. */
     xSemaphoreTake(s_ws_mutex, portMAX_DELAY);
     for (int i = 0; i < MAX_WS_CLIENTS; i++) {
         if (s_ws_clients[i].active) ws_evict_client(i, why);
@@ -211,50 +248,110 @@ static void ws_remove_client(int fd)
     xSemaphoreGive(s_ws_mutex);
 }
 
-void web_server_ws_broadcast(int port_index, const uint8_t *data, size_t len)
+static void ws_enqueue(const uint8_t *data, size_t len, int port)
 {
     if (!s_server) return;
 
-    httpd_ws_frame_t ws_pkt = {
-        .type = HTTPD_WS_TYPE_BINARY,
-        .payload = (uint8_t *)data,
-        .len = len,
-    };
+    /* Anything larger than one slot (a USB CDC read, a bulk paste echo) is
+     * split across slots. Splitting a byte stream at arbitrary boundaries is
+     * fine here — UART chunks already arrive that way, and the terminal
+     * concatenates frames. */
+    while (len > 0) {
+        size_t chunk = len > WS_TX_SLOT_MAX ? WS_TX_SLOT_MAX : len;
+
+        taskENTER_CRITICAL(&s_tx_mux);
+        if (s_tx_head - s_tx_tail >= WS_TX_SLOTS) {
+            s_tx_dropped++;
+            uint32_t drops = s_tx_dropped;
+            taskEXIT_CRITICAL(&s_tx_mux);
+            ESP_LOGW(TAG, "WS TX ring full, dropping %u bytes (%u cumulative)",
+                     (unsigned)chunk, (unsigned)drops);
+            return;  /* don't queue a partial continuation of this chunk */
+        }
+        ws_tx_slot_t *slot = &s_ws_tx_ring[s_tx_head % WS_TX_SLOTS];
+        slot->len = (uint16_t)chunk;
+        slot->port = (int16_t)port;
+        memcpy(slot->data, data, chunk);
+        s_tx_head++;
+        bool kick = !s_tx_kick_pending;
+        if (kick) s_tx_kick_pending = true;
+        taskEXIT_CRITICAL(&s_tx_mux);
+
+        if (kick && httpd_queue_work(s_server, ws_flush_work, NULL) != ESP_OK) {
+            taskENTER_CRITICAL(&s_tx_mux);
+            s_tx_kick_pending = false;
+            taskEXIT_CRITICAL(&s_tx_mux);
+        }
+
+        data += chunk;
+        len -= chunk;
+    }
+}
+
+/* Runs on the httpd task. Owns the sending end of the ring: tail and the kick
+ * flag move here, head moves in producers — each index has exactly one writer,
+ * so the spinlock only has to keep the pair consistent for the cross-task
+ * reads. Sending from this task and nowhere else is what makes WS sends safe
+ * against session teardown (see the ring comment).
+ *
+ * The spinlock never spans a send: each frame is copied to a stack buffer
+ * under it, then written out with interrupts enabled. */
+static void ws_flush_work(void *arg)
+{
+    (void)arg;
+
+    taskENTER_CRITICAL(&s_tx_mux);
+    s_tx_kick_pending = false;
+    taskEXIT_CRITICAL(&s_tx_mux);
 
     xSemaphoreTake(s_ws_mutex, portMAX_DELAY);
     ws_revalidate_locked();
-    for (int i = 0; i < MAX_WS_CLIENTS; i++) {
-        if (s_ws_clients[i].active && s_ws_clients[i].port_index == port_index) {
-            esp_err_t err = httpd_ws_send_frame_async(s_server, s_ws_clients[i].fd, &ws_pkt);
-            if (err != ESP_OK) {
-                s_ws_clients[i].active = false;
+    for (;;) {
+        uint16_t len;
+        int port;
+        uint8_t frame[WS_TX_SLOT_MAX];
+
+        taskENTER_CRITICAL(&s_tx_mux);
+        if (s_tx_head == s_tx_tail) {
+            taskEXIT_CRITICAL(&s_tx_mux);
+            break;
+        }
+        ws_tx_slot_t *slot = &s_ws_tx_ring[s_tx_tail % WS_TX_SLOTS];
+        len = slot->len;
+        port = slot->port;
+        memcpy(frame, slot->data, len);
+        /* Advance inside the lock so a producer on the other core can't see a
+         * stale tail and treat a popped slot as free. The slot is safe to
+         * recycle now: the send below works from the stack copy. */
+        s_tx_tail++;
+        taskEXIT_CRITICAL(&s_tx_mux);
+
+        httpd_ws_frame_t ws_pkt = {
+            .type = (port < 0) ? HTTPD_WS_TYPE_TEXT : HTTPD_WS_TYPE_BINARY,
+            .payload = frame,
+            .len = len,
+        };
+        for (int i = 0; i < MAX_WS_CLIENTS; i++) {
+            if (s_ws_clients[i].active &&
+                (port < 0 || s_ws_clients[i].port_index == port)) {
+                esp_err_t err = httpd_ws_send_frame_async(s_server, s_ws_clients[i].fd, &ws_pkt);
+                if (err != ESP_OK) {
+                    s_ws_clients[i].active = false;
+                }
             }
         }
     }
     xSemaphoreGive(s_ws_mutex);
 }
 
+void web_server_ws_broadcast(int port_index, const uint8_t *data, size_t len)
+{
+    ws_enqueue(data, len, port_index);
+}
+
 void web_server_ws_broadcast_text(const char *text)
 {
-    if (!s_server) return;
-
-    httpd_ws_frame_t ws_pkt = {
-        .type = HTTPD_WS_TYPE_TEXT,
-        .payload = (uint8_t *)text,
-        .len = strlen(text),
-    };
-
-    xSemaphoreTake(s_ws_mutex, portMAX_DELAY);
-    ws_revalidate_locked();
-    for (int i = 0; i < MAX_WS_CLIENTS; i++) {
-        if (s_ws_clients[i].active) {
-            esp_err_t err = httpd_ws_send_frame_async(s_server, s_ws_clients[i].fd, &ws_pkt);
-            if (err != ESP_OK) {
-                s_ws_clients[i].active = false;
-            }
-        }
-    }
-    xSemaphoreGive(s_ws_mutex);
+    ws_enqueue((const uint8_t *)text, strlen(text), -1);
 }
 
 // --- Helpers ---
