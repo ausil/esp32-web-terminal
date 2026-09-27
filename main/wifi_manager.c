@@ -348,7 +348,8 @@ esp_err_t wifi_manager_connect_sta(const char *ssid, const char *password)
     config_set_wifi_sta(ssid, password);
 
     // Ensure AP+STA mode so AP is available as fallback during connection
-    if (s_status.mode != WIFI_MGR_MODE_AP_STA) {
+    bool was_running = (s_status.mode == WIFI_MGR_MODE_AP_STA);
+    if (!was_running) {
         esp_wifi_stop();
         esp_err_t err = esp_wifi_set_mode(WIFI_MODE_APSTA);
         if (err != ESP_OK) {
@@ -376,10 +377,23 @@ esp_err_t wifi_manager_connect_sta(const char *ssid, const char *password)
 
     s_retry_count = 0;
     xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
-    err = esp_wifi_start();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Could not start WiFi: %s", esp_err_to_name(err));
-        return err;
+    if (was_running) {
+        /* WiFi is already up — esp_wifi_start() would return INVALID_STATE and
+         * the caller would report the (perfectly good) credentials as invalid.
+         * Kick a connect instead; it applies the config just written. An
+         * in-flight attempt answering ESP_ERR_WIFI_CONN is success too. */
+        err = esp_wifi_connect();
+        if (err != ESP_OK && err != ESP_ERR_WIFI_CONN) {
+            ESP_LOGE(TAG, "Could not start STA connect: %s", esp_err_to_name(err));
+            return err;
+        }
+    } else {
+        /* The STA_START event handler issues the actual esp_wifi_connect() */
+        err = esp_wifi_start();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Could not start WiFi: %s", esp_err_to_name(err));
+            return err;
+        }
     }
 
     ESP_LOGI(TAG, "Attempting STA connection to '%s'", ssid);
