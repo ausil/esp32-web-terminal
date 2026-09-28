@@ -4,6 +4,60 @@ Notable changes per release. This log starts at 1.6.0 — earlier releases are
 described by their [GitHub release notes](https://github.com/ausil/esp32-web-terminal/releases)
 and git history.
 
+## 1.6.1
+
+A hardening and reliability release on top of 1.6.0: the fixes below close
+several ways a device could misbehave or drop its terminal under load, and
+the firmware now ships with a host test suite that CI requires to pass
+before any release.
+
+### Fixed
+
+- **WebSocket frames are now sent only from the httpd task.** The serial
+  bridge pushed frames straight onto sockets from the UART/USB tasks, which
+  `esp_http_server` does not support: it has no per-socket send lock, so a
+  push racing session teardown could write onto a recycled socket descriptor
+  — corrupting another client's stream or worse. Serial data now flows
+  through a bounded ring that the httpd task drains; when the task is busy
+  (an OTA upload, for example) frames are dropped with a counter instead of
+  blocking the bridge. Sessions that die while a terminal is open are also
+  cut off reliably now, since `close()` on a tracked descriptor no longer
+  races the server's own teardown.
+- **Session cookies are matched by exact cookie name.** A cookie named
+  `xsession` (or any name ending in `session`) could satisfy the `session`
+  lookup, handing its holder the authenticated cookie's session.
+- **USB CDC hot-unplug no longer crashes the bridge.** The CDC device handle
+  is now guarded across check-use pairs, so yanking a device mid-`send()`
+  or mid-baud-change cannot free a handle another path is using. The
+  bridge task also refuses to start if its library task never signals
+  ready, instead of running against half-initialised USB host state.
+- **Re-saving STA credentials from AP+STA mode no longer fails.** With STA
+  configured but disconnected, applying the same credentials called
+  `esp_wifi_start()` on an already-running stack and reported invalid
+  credentials; it now calls `esp_wifi_connect()` and accepts the
+  already-connecting error.
+- **A present-but-invalid body on `POST /api/power` returns `400`.** It
+  used to fall through to toggling the relay, so a malformed request could
+  flip the SBC's power; an explicitly absent body still means toggle.
+- **The captive-portal 404 redirects to the host the client actually
+  reached**, instead of a fixed address, so phones probing `captive.apple.com`
+  land on the device's page however they found it.
+- **WiFi scans no longer leak driver memory** (the AP list is cleared after
+  every scan), and the scan-suppression and NTP-sync flags can no longer be
+  cached in registers across tasks.
+
+### Testing
+
+- New host unit-test harness under `tests/host/`: the config crypto is
+  checked against known PBKDF2 vectors and an independent SHA-256 oracle,
+  auth covers sessions, per-IP lockout and the cookie parser, OTA covers
+  semver and asset selection, and the WS TX ring is compiled from
+  `web_server.c` itself so the tests cannot drift from production. A pytest
+  suite covers `tools/factory_flash.py`'s NVS pre-seeding, including a hash
+  vector shared with the C suite.
+- CI runs both suites on every push and pull request, and the release job
+  waits for them in addition to the three firmware targets.
+
 ## 1.6.0
 
 A security release. It closes a credential-free path to the serial console and
