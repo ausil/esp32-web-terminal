@@ -4,6 +4,7 @@
 
 | Version | Supported |
 |---------|-----------|
+| 1.6.2   | Yes       |
 | 1.6.1   | Yes       |
 | 1.6.0   | Yes       |
 | ≤ 1.5.2 | **No** — see the advisory below |

@@ -4,6 +4,26 @@ Notable changes per release. This log starts at 1.6.0 — earlier releases are
 described by their [GitHub release notes](https://github.com/ausil/esp32-web-terminal/releases)
 and git history.
 
+## 1.6.2
+
+Fixes a 1.6.1 regression that could turn an OTA update into a rollback on
+some ESP32-S3 boards. If you updated to 1.6.1 successfully, this release
+changes nothing else for you.
+
+### Fixed
+
+- **An ESP32-S3 whose USB host stack fails to install now boots with the
+  UART bridge instead of aborting.** 1.6.1 made the USB CDC bridge refuse
+  to start when the host library never signalled ready — correct behaviour
+  for a half-initialised USB host, wrong behaviour for a port that is
+  optional by design: the failure propagated to an `ESP_ERROR_CHECK` in
+  `app_main`, which panicked before the new image could mark itself valid,
+  so OTA'd boards rebooted, panicked, and rolled back (observed on one S3
+  rev 2; `usb_host_install` hangs on that board). The device now logs the
+  failure, the USB port reports absent, and the terminal, GPIO and web UI
+  work. `ESP_ERROR_CHECK` was also removed from the two install calls
+  inside the USB library task, which could panic-reboot the same way.
+
 ## 1.6.1
 
 A hardening and reliability release on top of 1.6.0: the fixes below close
