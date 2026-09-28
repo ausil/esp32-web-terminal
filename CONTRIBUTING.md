@@ -36,6 +36,27 @@ If you change `sdkconfig.defaults` or switch targets, do a full clean rebuild:
 rm sdkconfig && idf.py fullclean && idf.py set-target esp32c6 && idf.py build
 ```
 
+### Running tests
+
+Host unit tests compile the real firmware sources (config crypto, auth
+sessions, OTA semver, the WS TX ring) against stubbed IDF headers — no
+ESP-IDF and no hardware needed. Only gcc, make, and OpenSSL dev headers:
+
+```bash
+make -C tests/host test
+```
+
+The `tools/factory_flash.py` suite needs pytest:
+
+```bash
+python -m pip install pytest
+python -m pytest tests/tools
+```
+
+Both suites run on every push and pull request, and releases are gated on
+them. If you touch `main/web_server.c` between the `Serial→WS TX ring`
+markers, the ring tests re-extract it from source — no stale copies.
+
 ## Project Structure
 
 ```
@@ -43,6 +64,8 @@ main/           C firmware source (ESP-IDF components)
 frontend/       Single-page web UI (vanilla JS, no build step)
 hardware/       PCB design docs and wiring guides
 certs/          TLS certificate generation
+tests/host/     Host unit tests (Unity, stubbed IDF headers)
+tests/tools/    pytest suite for tools/factory_flash.py
 ```
 
 See [CLAUDE.md](CLAUDE.md) for detailed architecture documentation.

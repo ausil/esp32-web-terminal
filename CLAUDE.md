@@ -60,7 +60,28 @@ tools/
                       vX.Y.Z-factory companion prerelease (bootloader+partitions+app,
                       merged via idf.py merge-bin in CI), flashes at 0x0; optional
                       --config pre-seeds NVS (webterm namespace)
+tests/
+  host/             - Host unit tests (Unity + stubbed IDF headers, no ESP-IDF):
+                      `make -C tests/host test`. Covers config crypto (vs OpenSSL),
+                      auth sessions/lockout/cookie parsing, OTA semver, and the WS TX
+                      ring. The ring test compiles code extracted verbatim from
+                      web_server.c between the `/* --- Serial→WS TX ring ---` and
+                      `web_server_ws_broadcast` markers (extract_ring.py) — moving or
+                      renaming those markers breaks the build loudly, by design.
+                      Vendored Unity/cJSON live in tests/host/{unity,cjson}.
+  tools/            - pytest suite for tools/factory_flash.py (NVS CSV generation,
+                      auth-hash parity with config.c, release asset selection):
+                      `python -m pytest tests/tools`
 ```
+
+## Testing
+
+- CI runs both suites on every push/PR (`host-tests` job in build.yml) and the
+  release job waits for them in addition to the firmware builds.
+- Host suites compile real sources from main/ against tests/host/stubs/ — a stub
+  is only added when production starts using a missing IDF API.
+- PBKDF2 vectors are shared between tests/host/test_config.c and
+  tests/tools/test_factory_flash.py: if the KDF changes, both must change.
 
 ## Key APIs
 
