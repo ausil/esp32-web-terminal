@@ -54,17 +54,29 @@ esp_err_t serial_port_init_all(void)
     s_port_count = 2;
 #endif
 
-    // Initialize all ports
+    // Initialize all ports. UART is the primary console, so its failure stays
+    // fatal; the USB CDC port is optional (it starts absent and hot-plugs
+    // later), and an S3 that cannot install its USB host stack must still boot
+    // with the UART. Making its failure fatal turned a board-specific USB
+    // install timeout into a failed OTA: the device rebooted into the new
+    // image, aborted before marking itself valid, and rolled back.
     for (int i = 0; i < s_port_count; i++) {
+        bool optional = (s_ports[i].type == SERIAL_TYPE_USB_CDC);
+        const char *stage = "init";
         esp_err_t err = s_ports[i].init(i, conf->baud_rate[i]);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Port %d (%s) init failed: %s", i, s_ports[i].name, esp_err_to_name(err));
-            return err;
+        if (err == ESP_OK) {
+            stage = "start";
+            err = s_ports[i].start(i);
         }
-        err = s_ports[i].start(i);
         if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Port %d (%s) start failed: %s", i, s_ports[i].name, esp_err_to_name(err));
-            return err;
+            if (!optional) {
+                ESP_LOGE(TAG, "Port %d (%s) %s failed: %s",
+                         i, s_ports[i].name, stage, esp_err_to_name(err));
+                return err;
+            }
+            ESP_LOGW(TAG, "Port %d (%s) unavailable (%s: %s) — continuing without it",
+                     i, s_ports[i].name, stage, esp_err_to_name(err));
+            continue;
         }
         ESP_LOGI(TAG, "Port %d (%s) ready, baud=%lu", i, s_ports[i].name, conf->baud_rate[i]);
     }

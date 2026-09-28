@@ -125,7 +125,16 @@ static void usb_lib_task(void *arg)
         .skip_phy_setup = false,
         .intr_flags = ESP_INTR_FLAG_LOWMED,
     };
-    ESP_ERROR_CHECK(usb_host_install(&host_config));
+    /* Not ESP_ERROR_CHECK: an install failure here used to panic-reboot the
+     * whole device (a failed OTA that then rolled back on boards where USB
+     * host init fails). Without the notify, usb_cdc_start() times out and
+     * the port stays absent; the UART console and web UI are unaffected. */
+    esp_err_t err = usb_host_install(&host_config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "usb_host_install failed: %s — USB CDC port disabled",
+                 esp_err_to_name(err));
+        return;
+    }
 
     const cdc_acm_host_driver_config_t driver_config = {
         .driver_task_stack_size = 4096,
@@ -133,7 +142,12 @@ static void usb_lib_task(void *arg)
         .xCoreID = 0,
         .new_dev_cb = new_dev_cb,
     };
-    ESP_ERROR_CHECK(cdc_acm_host_install(&driver_config));
+    err = cdc_acm_host_install(&driver_config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "cdc_acm_host_install failed: %s — USB CDC port disabled",
+                 esp_err_to_name(err));
+        return;
+    }
 
     xTaskNotifyGive(arg);
 
@@ -266,6 +280,9 @@ esp_err_t usb_cdc_start(int port_index)
 
 esp_err_t usb_cdc_send(int port_index, const uint8_t *data, size_t len)
 {
+    /* serial_port treats this port as optional: if init/start failed the
+     * bridge never came up and s_cdc_mutex may not exist. */
+    if (!s_cdc_mutex) return ESP_ERR_INVALID_STATE;
     xSemaphoreTake(s_cdc_mutex, portMAX_DELAY);
     if (!s_cdc_dev) {
         xSemaphoreGive(s_cdc_mutex);
@@ -282,6 +299,7 @@ esp_err_t usb_cdc_send(int port_index, const uint8_t *data, size_t len)
 
 esp_err_t usb_cdc_set_baud_rate(int port_index, uint32_t baud_rate)
 {
+    if (!s_cdc_mutex) return ESP_ERR_INVALID_STATE;  // bridge never initialized
     s_baud_rate = baud_rate;
 
     xSemaphoreTake(s_cdc_mutex, portMAX_DELAY);
@@ -308,6 +326,7 @@ esp_err_t usb_cdc_set_baud_rate(int port_index, uint32_t baud_rate)
 
 bool usb_cdc_is_connected(void)
 {
+    if (!s_cdc_mutex) return false;  // bridge never initialized
     bool connected;
     xSemaphoreTake(s_cdc_mutex, portMAX_DELAY);
     connected = (s_cdc_dev != NULL);
