@@ -121,7 +121,20 @@ jobs:
             esp32-web-terminal-esp32c3.bin
             esp32-web-terminal-esp32c6.bin
             esp32-web-terminal-esp32s3.bin
-          body_file: release-notes.md
+          body_path: release-notes.md
+
+      # The action silently ignores misnamed inputs, so a green job alone
+      # doesn't prove the notes landed — check what actually published.
+      - name: Verify published notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          len=$(gh release view "$GITHUB_REF_NAME" --json body --jq '.body | length')
+          if [ "${len:-0}" -lt 10 ]; then
+            echo "::error::Published release body is empty ($len chars) — notes wiring broken"
+            exit 1
+          fi
+          echo "release notes: $len chars"
 
       - name: Create factory images release
         uses: softprops/action-gh-release@v3
