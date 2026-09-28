@@ -4,6 +4,45 @@ Notable changes per release. This log starts at 1.6.0 — earlier releases are
 described by their [GitHub release notes](https://github.com/ausil/esp32-web-terminal/releases)
 and git history.
 
+## 1.6.3
+
+Session lifetime no longer interrupts active work, and when a session does
+end — an idle timeout or a firmware update — the browser shows the login form
+instead of a terminal stuck at "Disconnected".
+
+### Changed
+
+- **Session expiry is now idle-based.** The one-hour timeout was measured from
+  login, so the terminal died mid-typing at minute 60 regardless of activity.
+  Any validated use now slides the window, so an actively used console survives
+  indefinitely while an abandoned one still expires exactly an hour after its
+  last use. Slot eviction became least-recently-used rather than
+  first-created, so refreshing a session protects it from a slot squeeze.
+
+### Fixed
+
+- **An expired session takes you back to the login form.** The WebSocket close
+  handler retried the handshake every three seconds for as long as a token was
+  held, and since an expired session refuses every attempt, the UI sat at
+  "Disconnected" with no prompt and no way back except knowing to reload. On
+  close the browser now probes `/api/token`, which distinguishes the cases the
+  socket cannot: a live session resumes the terminal, a network blip retries
+  with backoff (1s up to 15s, reset on a successful connect), and a refused
+  token clears it and shows "Session expired — please log in again." This is
+  also what you now see after a firmware update, because a rebooted device
+  starts with an empty session table.
+- **Keystrokes no longer relay on a dead session.** Inbound frames now validate
+  the sender's token, which serves two purposes: on a serial line producing no
+  output, typing is the only liveness signal available (the push path can only
+  revalidate when bytes flow outward), and a socket whose session died while it
+  stayed open closes on the next frame rather than continuing to feed the SBC
+  until the next outgoing byte happened to trigger a check.
+
+### Testing
+
+Host tests grow to 42: idle versus sliding expiry across two full timeout
+windows, the LRU eviction key, and the inbound-frame validation path.
+
 ## 1.6.2
 
 Fixes a 1.6.1 regression that could turn an OTA update into a rollback on

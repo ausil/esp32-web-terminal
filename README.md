@@ -213,7 +213,7 @@ other unchanged.
 
 ## Security
 
-**Update to 1.6.2.** Releases through 1.5.2 let an unauthenticated host on the
+**Update to 1.6.3.** Releases through 1.5.2 let an unauthenticated host on the
 network open the serial console — which for most deployments is a root shell on
 the attached SBC. [SECURITY.md](SECURITY.md) has the advisory and
 [CHANGELOG.md](CHANGELOG.md) lists everything that changed;
