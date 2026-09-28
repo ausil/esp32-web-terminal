@@ -280,6 +280,7 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
     var fitAddon = null;
     var sessionToken = null;
     var reconnectTimer = null;
+    var reconnectDelay = 1000;  // backoff for the probe loop; reset on open
 
     var statusDot = document.getElementById("status-dot");
     var statusText = document.getElementById("status-text");
@@ -394,6 +395,7 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
         ws.binaryType = "arraybuffer";
 
         ws.onopen = function() {
+            reconnectDelay = 1000;
             var portName = ports.length > 0 ? ports[currentPort].name : "UART";
             setStatus(true, "Connected (" + portName + ")");
         };
@@ -418,9 +420,41 @@ window.FitAddon={FitAddon:class{activate(e){this._terminal=e}dispose(){}fit(){co
         };
         ws.onclose = function() {
             setStatus(false, "Disconnected");
-            if (sessionToken) reconnectTimer = setTimeout(connectWs, 3000);
+            if (sessionToken) scheduleReconnect();
         };
         ws.onerror = function() { setStatus(false, "Connection error"); };
+    }
+
+    /* A dropped terminal used to blind-retry every 3s forever: when the
+     * session had actually expired the handshake just kept failing and the
+     * user stared at "Disconnected" with no way back to the login form. Probe
+     * /api/token instead — it revalidates the cookie, so it distinguishes the
+     * two cases the raw socket can't. A fresh token (or 401) means the session
+     * is really gone: surface the login form. A network error means the link
+     * blipped: retry quietly as before. */
+    function scheduleReconnect() {
+        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+        if (!sessionToken) return;
+        setStatus(false, "Reconnecting…");
+        var delay = reconnectDelay;
+        reconnectDelay = Math.min(reconnectDelay * 2, 15000);  // backoff; reset in onopen
+        api("GET", "/api/token", null, function(err, data, status) {
+            if (err || status === 429) {           // link blipped — keep trying
+                reconnectTimer = setTimeout(scheduleReconnect, delay);
+                return;
+            }
+            if (status === 200 && data && data.token) {
+                sessionToken = data.token;          // session alive — resume
+                connectWs();                        // onopen resets the backoff
+                return;
+            }
+            // 401/403: session expired (or device re-locked). Show login.
+            sessionToken = null;
+            reconnectDelay = 1000;
+            setStatus(false, "Session expired");
+            loginError.textContent = "Session expired — please log in again.";
+            loginOverlay.classList.remove("hidden");
+        });
     }
 
     // --- Auth ---
