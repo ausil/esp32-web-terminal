@@ -79,11 +79,34 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v6
+
       - name: Download all artifacts
         uses: actions/download-artifact@v8
         with:
           pattern: firmware-*
           merge-multiple: true
+
+      # Release notes are the CHANGELOG section for this tag — hand-written
+      # prose that can never drift from (or go missing relative to) the
+      # changelog. A missing section fails the release instead of silently
+      # publishing the compare-link stub.
+      - name: Extract release notes from CHANGELOG
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          awk -v v="$VERSION" '
+            !in_s && $0 ~ "^## " v "([[:space:]]|$)" { in_s = 1; next }
+            in_s && /^## / {
+              printf "\n**Previous release:** %s\n", $2
+              exit
+            }
+            in_s { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "::error::CHANGELOG.md has no '## $VERSION' section — add it before releasing"
+            exit 1
+          fi
+          head release-notes.md
 
       # Keep the main release at 3 assets (app bins only) and publish factory
       # images as a companion prerelease, which releases/latest excludes.
@@ -98,7 +121,7 @@ jobs:
             esp32-web-terminal-esp32c3.bin
             esp32-web-terminal-esp32c6.bin
             esp32-web-terminal-esp32s3.bin
-          generate_release_notes: true
+          body_file: release-notes.md
 
       - name: Create factory images release
         uses: softprops/action-gh-release@v3
