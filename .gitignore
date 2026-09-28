@@ -8,3 +8,4 @@ certs/server.key
 hardware/
 *.bin
 __pycache__/
+.pytest_cache/
