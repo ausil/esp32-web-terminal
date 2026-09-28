@@ -7,6 +7,7 @@
 #include "esp_log.h"
 #include "esp_random.h"
 #include "mbedtls/md.h"
+#include <stdlib.h>
 #include <string.h>
 
 static const char *TAG = "config";
