@@ -80,17 +80,62 @@ void test_session_eviction(void)
     for (int i = 0; i <= AUTH_MAX_SESSIONS; i++) free(toks[i]);
 }
 
-/* Timeout uses the monotonic clock (esp_timer), NOT wall time: a 3601s jump
- * must expire, and an NTP-style wall-clock leap (we just keep using the fake
- * monotonic clock) must not expire sessions early. */
+/* Timeout uses the monotonic clock (esp_timer), NOT wall time: an idle jump
+ * past the window must expire, and an NTP-style wall-clock leap (we just keep
+ * using the fake monotonic clock) must not expire sessions early. */
 void test_session_expiry_monotonic(void)
 {
     char *t = tok("admin", "admin", "10.0.0.1");
-    test_clock_advance_us((int64_t)(AUTH_SESSION_TIMEOUT_S - 60) * 1000000);
-    TEST_ASSERT_TRUE(auth_validate_session(t));
-    test_clock_advance_us(120LL * 1000000);
+    test_clock_advance_us((int64_t)(AUTH_SESSION_TIMEOUT_S + 1) * 1000000);
     TEST_ASSERT_FALSE(auth_validate_session(t));
     free(t);
+}
+
+/* Expiry is idle-based, not absolute: each validated use slides the window,
+ * so an actively-used console never dies mid-session, but a session nobody
+ * touches still expires exactly at the timeout. (An hour after login, even
+ * while typing, used to cut the terminal with no way back to the login form.) */
+void test_session_slides_on_activity(void)
+{
+    char *t = tok("admin", "admin", "10.0.0.1");
+    /* Live through two full windows of activity... */
+    for (int round = 0; round < 2; round++) {
+        test_clock_advance_us((int64_t)(AUTH_SESSION_TIMEOUT_S - 60) * 1000000);
+        TEST_ASSERT_TRUE(auth_validate_session(t));   // validated use = activity
+        test_clock_advance_us(120LL * 1000000);       // 120s since that use
+        TEST_ASSERT_TRUE(auth_validate_session(t));
+    }
+    /* ...and it still expires when the gap finally exceeds the window. */
+    test_clock_advance_us((int64_t)(AUTH_SESSION_TIMEOUT_S + 1) * 1000000);
+    TEST_ASSERT_FALSE(auth_validate_session(t));
+    free(t);
+}
+
+/* When every slot is live, login evicts by last use, not creation order:
+ * refreshing the first-created session must save it from eviction. (All
+ * sessions here stay inside the idle window, so the slot scan can't free a
+ * slot by expiry and is forced into the LRU path.) */
+void test_eviction_prefers_least_recently_used(void)
+{
+    char *toks[AUTH_MAX_SESSIONS + 1];
+    for (int i = 0; i < AUTH_MAX_SESSIONS; i++) {
+        test_clock_advance_us(1000000);
+        toks[i] = tok("admin", "admin", "10.0.0.1");
+        TEST_ASSERT_NOT_NULL(toks[i]);
+    }
+    /* Refresh toks[0] last, then create a fifth session: toks[1] now has the
+     * stalest last-activity and must be the one evicted. */
+    test_clock_advance_us(1000000);
+    TEST_ASSERT_TRUE(auth_validate_session(toks[0]));
+    test_clock_advance_us(1000000);
+    toks[AUTH_MAX_SESSIONS] = tok("admin", "admin", "10.0.0.1");
+    TEST_ASSERT_NOT_NULL(toks[AUTH_MAX_SESSIONS]);
+    TEST_ASSERT_TRUE(auth_validate_session(toks[0]));    // survived: used most recently
+    TEST_ASSERT_FALSE(auth_validate_session(toks[1]));   // evicted: stalest last use
+    for (int i = 2; i <= AUTH_MAX_SESSIONS; i++) {
+        TEST_ASSERT_TRUE(auth_validate_session(toks[i]));
+    }
+    for (int i = 0; i <= AUTH_MAX_SESSIONS; i++) free(toks[i]);
 }
 
 /* Lockout is per-address: attacker on .66 must not lock the owner out on .10
@@ -226,6 +271,8 @@ int main(void)
     RUN_TEST(test_invalidate_all_on_password_change);
     RUN_TEST(test_session_eviction);
     RUN_TEST(test_session_expiry_monotonic);
+    RUN_TEST(test_session_slides_on_activity);
+    RUN_TEST(test_eviction_prefers_least_recently_used);
     RUN_TEST(test_lockout_per_ip);
     RUN_TEST(test_lockout_expires);
     RUN_TEST(test_success_clears_counter);

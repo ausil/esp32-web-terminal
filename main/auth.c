@@ -48,7 +48,8 @@ static const char *cookie_value(const char *header, const char *name, size_t *ou
 
 typedef struct {
     char token[AUTH_SESSION_TOKEN_LEN * 2 + 1]; // hex string
-    time_t created;
+    time_t last_activity;  // slid forward by auth_validate_session(); also the
+                           // key for LRU eviction when all slots are full
     bool active;
 } session_t;
 
@@ -163,33 +164,33 @@ char *auth_login(const char *username, const char *password, const char *client_
         ok->lockout_until = 0;
     }
 
-    // Find free session slot (or evict oldest)
+    // Find free session slot (or evict least recently used)
     int slot = -1;
     time_t oldest_time = 0;
     int oldest_slot = 0;
     time_t now = mono_now();
 
     for (int i = 0; i < AUTH_MAX_SESSIONS; i++) {
-        // Expire old sessions
-        if (s_sessions[i].active && (now - s_sessions[i].created) > AUTH_SESSION_TIMEOUT_S) {
+        // Expire idle sessions
+        if (s_sessions[i].active && (now - s_sessions[i].last_activity) > AUTH_SESSION_TIMEOUT_S) {
             s_sessions[i].active = false;
         }
         if (!s_sessions[i].active) {
             slot = i;
             break;
         }
-        if (oldest_time == 0 || s_sessions[i].created < oldest_time) {
-            oldest_time = s_sessions[i].created;
+        if (oldest_time == 0 || s_sessions[i].last_activity < oldest_time) {
+            oldest_time = s_sessions[i].last_activity;
             oldest_slot = i;
         }
     }
 
     if (slot < 0) {
-        slot = oldest_slot; // evict oldest
+        slot = oldest_slot; // evict least recently used
     }
 
     generate_token(s_sessions[slot].token, sizeof(s_sessions[slot].token));
-    s_sessions[slot].created = now;
+    s_sessions[slot].last_activity = now;
     s_sessions[slot].active = true;
 
     char *result = strdup(s_sessions[slot].token);
@@ -205,10 +206,17 @@ bool auth_validate_session(const char *token)
 
     for (int i = 0; i < AUTH_MAX_SESSIONS; i++) {
         if (s_sessions[i].active && strcmp(s_sessions[i].token, token) == 0) {
-            if ((now - s_sessions[i].created) > AUTH_SESSION_TIMEOUT_S) {
+            if ((now - s_sessions[i].last_activity) > AUTH_SESSION_TIMEOUT_S) {
                 s_sessions[i].active = false;
                 return false;
             }
+            /* Sliding expiry: a validated use counts as activity, so an active
+             * console session does not die mid-typing an hour after login.
+             * The idle ceiling is unchanged — walk away and it still expires.
+             * Every caller runs on the httpd task (handlers, the WS handshake,
+             * and the ring's push-path revalidation), which is the same
+             * single-threaded invariant that lets auth.c skip locking here. */
+            s_sessions[i].last_activity = now;
             return true;
         }
     }

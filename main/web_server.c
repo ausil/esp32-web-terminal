@@ -248,6 +248,35 @@ static void ws_remove_client(int fd)
     xSemaphoreGive(s_ws_mutex);
 }
 
+/* One lookup for the data-frame path: finds the client by fd, reports its
+ * port, and validates the sender's token — an inbound frame is activity, so
+ * this slides the session's idle timeout. That matters most on a silent
+ * serial line: the push path can only revalidate when bytes flow outward, so
+ * without this, typing at a dead-still SBC would still let the hour expire.
+ * On the httpd task, same invariant as ws_revalidate_locked.
+ *
+ * Returns false if the fd is not registered or its session died while the
+ * socket stayed open — the caller must drop the connection rather than relay
+ * keystrokes on a dead session until the next push happens to notice. */
+static bool ws_touch_client(int fd, int *port_index)
+{
+    xSemaphoreTake(s_ws_mutex, portMAX_DELAY);
+    bool ok = false;
+    for (int i = 0; i < MAX_WS_CLIENTS; i++) {
+        if (s_ws_clients[i].active && s_ws_clients[i].fd == fd) {
+            if (auth_validate_session(s_ws_clients[i].token)) {
+                *port_index = s_ws_clients[i].port_index;
+                ok = true;
+            } else {
+                ws_evict_client(i, "session no longer valid");
+            }
+            break;
+        }
+    }
+    xSemaphoreGive(s_ws_mutex);
+    return ok;
+}
+
 static void ws_enqueue(const uint8_t *data, size_t len, int port)
 {
     if (!s_server) return;
@@ -1258,20 +1287,12 @@ static esp_err_t handle_ws(httpd_req_t *req)
         return ESP_OK;
     }
 
-    /* Data frame — only fds registered at an authenticated handshake may talk */
+    /* Data frame — only fds registered at an authenticated handshake may
+     * talk, and the frame counts as activity (slides the session's idle
+     * timeout; see ws_touch_client). */
     int fd = httpd_req_to_sockfd(req);
     int client_port = 0;
-    bool found = false;
-    xSemaphoreTake(s_ws_mutex, portMAX_DELAY);
-    for (int i = 0; i < MAX_WS_CLIENTS; i++) {
-        if (s_ws_clients[i].active && s_ws_clients[i].fd == fd) {
-            client_port = s_ws_clients[i].port_index;
-            found = true;
-            break;
-        }
-    }
-    xSemaphoreGive(s_ws_mutex);
-    if (!found) {
+    if (!ws_touch_client(fd, &client_port)) {
         ESP_LOGW(TAG, "WS frame from unregistered fd=%d, closing", fd);
         return ESP_FAIL;
     }

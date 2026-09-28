@@ -10,6 +10,7 @@
 /* Provided by the extracted ring TU; ws_add_client is static in production,
  * the bridge exposes the real handshake registration (last_auth_us init). */
 extern bool test_ws_add_client(int fd, int port_index, const char *token);
+extern bool test_ws_touch_client(int fd, int *port_index);
 extern void test_ws_reset(void);
 extern void web_server_ws_close_all(const char *why);
 extern void web_server_ws_broadcast(int port_index, const uint8_t *data, size_t len);
@@ -182,6 +183,55 @@ void test_close_all_sends_close_frames(void)
     TEST_ASSERT_EQUAL_INT(2, test_httpd_send_count());
 }
 
+/* Inbound frames count as session activity: a live client's touch succeeds
+ * and reports its port; an unregistered fd never does. */
+void test_touch_validates_and_reports_port(void)
+{
+    test_httpd_ws_register(11);
+    test_ws_add_client(11, 2, "tok");
+    int port = -1;
+    TEST_ASSERT_TRUE(test_ws_touch_client(11, &port));
+    TEST_ASSERT_EQUAL_INT(2, port);
+
+    int dummy = 0;
+    TEST_ASSERT_FALSE(test_ws_touch_client(99, &dummy));  /* never registered */
+}
+
+/* Touch is not throttled like the push-path revalidation: every inbound
+ * frame triggers validation, across full revalidation windows, and a live
+ * client keeps its slot and reports its port each time. (The sliding of the
+ * session window itself is real auth.c logic, tested in test_auth.c against
+ * the actual session table; the ring stub only distinguishes BAD.) */
+void test_touch_survives_revalidation_windows(void)
+{
+    test_httpd_ws_register(11);
+    test_ws_add_client(11, 0, "tok");
+    int port = -1;
+    for (int round = 0; round < 3; round++) {
+        test_clock_advance_us(1100000);   /* past the push-path throttle */
+        TEST_ASSERT_TRUE(test_ws_touch_client(11, &port));
+        TEST_ASSERT_EQUAL_INT(0, port);
+    }
+}
+
+/* A client whose session died must stop touching successfully the moment its
+ * token stops validating, and its slot is released (close frame sent) rather
+ * than left open to relay keystrokes. Touch ignores the 1s push-path
+ * throttle, so this holds even on the very first frame. */
+void test_touch_evicts_dead_session(void)
+{
+    test_httpd_ws_register(11);
+    TEST_ASSERT_TRUE(test_ws_add_client(11, 0, "BAD"));  /* invalid token */
+    int port = -1;
+    TEST_ASSERT_FALSE(test_ws_touch_client(11, &port));  /* immediate, no throttle */
+    int fd; uint8_t type; size_t len;
+    TEST_ASSERT_EQUAL_INT(0, test_httpd_send_nth(0, &fd, &type, &len, NULL, 0));
+    TEST_ASSERT_EQUAL_INT(11, fd);
+    TEST_ASSERT_EQUAL_UINT8(HTTPD_WS_TYPE_CLOSE, type);
+    /* Slot released: a further touch finds no client. */
+    TEST_ASSERT_FALSE(test_ws_touch_client(11, &port));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -193,5 +243,8 @@ int main(void)
     RUN_TEST(test_ring_revokes_dead_sessions);
     RUN_TEST(test_ring_send_failure_deactivates);
     RUN_TEST(test_close_all_sends_close_frames);
+    RUN_TEST(test_touch_validates_and_reports_port);
+    RUN_TEST(test_touch_survives_revalidation_windows);
+    RUN_TEST(test_touch_evicts_dead_session);
     return UNITY_END();
 }

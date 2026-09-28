@@ -52,11 +52,17 @@ void web_server_ws_broadcast_text(const char *text)
     ws_enqueue((const uint8_t *)text, strlen(text), -1);
 }
 
-/* Test bridge: ws_add_client is static in production; tests need the real
- * handshake registration path (it initializes last_auth_us). */
+/* Test bridge: ws_add_client and ws_touch_client are static in production;
+ * tests need the real handshake registration path (it initializes
+ * last_auth_us) and the real data-frame auth touch. */
 bool test_ws_add_client(int fd, int port_index, const char *token)
 {
     return ws_add_client(fd, port_index, token);
+}
+
+bool test_ws_touch_client(int fd, int *port_index)
+{
+    return ws_touch_client(fd, port_index);
 }
 
 /* Test bridge: zero every piece of ring/client state between tests. These
